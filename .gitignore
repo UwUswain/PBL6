@@ -1,0 +1,39 @@
+# Data & Archives (Chặn cả data lẫn dataset nếu vô tình đặt tên)
+data/
+dataset/
+*.nii
+*.nii.gz
+*.zip
+*.tar.gz
+*.dcm
+
+# Chặn tài liệu y khoa nặng > 50MB (Nên lưu Drive)
+docs/phuc/
+*.pdf
+*.ppt
+*.docx
+
+# Checkpoints & Experiments
+experiments/runs/
+*.pth
+*.pt
+*.onnx
+outputs/
+logs/
+wandb/
+
+# Python cache & Venv
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS / IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+
+results/
+reserve/
