@@ -1,4 +1,4 @@
-﻿# PBL6: Ischemic Stroke Lesion Segmentation (ISLES 2022)
+# PBL6: Ischemic Stroke Lesion Segmentation (ISLES 2022)
 
 Automated ischemic stroke lesion segmentation from multi-modal brain MRI scans (DWI, ADC, FLAIR) using deep learning.
 
@@ -54,3 +54,10 @@ Scan the dataset and generate shape & spacing statistics:
 ```bash
 python scripts/inspect_dataset.py
 ```
+
+## Documentation & Decisions
+
+- **[ISLES-2022 Knowledge Vault](notes/00_ISLES2022_Knowledge_Vault.md):** Medical domain context, ischemic cascade, multi-modal MRI signals, and challenge guidelines.
+- **[Model Benchmark Report](Benchmark.md):** Comparative benchmark on ISLES-2022 dataset and selection of **MedNeXt** (MICCAI 2023) as core contribution.
+- **[Cloud GPU Pricing & Training Guide](server_pricing.md):** GPU server rental analysis (RunPod / Vast.ai), budget estimation (~$10 USD), and remote training workflow.
+

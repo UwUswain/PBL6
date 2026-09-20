@@ -80,16 +80,28 @@ ISLES 2022 **tuyệt đối không chỉ dùng mỗi Dice Score** vì hiện tư
 | **Kết quả trên ISLES-2022** | Dice thường chỉ đạt 0.50 - 0.62. | **Các đội top đầu và nnU-Net đều dùng 3D**, Dice đạt 0.70 - 0.78+. |
 
 **-> Quyết định tối ưu cho PBL6:**
-- Máy cá nhân (GTX 1650 Ti - 4GB): Huấn luyện **3D Patch-based** (dùng MONAI cắt khối $96 \times 96 \times 32$ với `RandCropByPosNegLabeld`) hoặc **2.5D Multi-slice input** làm baseline thử nghiệm.
-- Khi train chính thức: Đẩy code lên Google Colab (T4 16GB) hoặc Kaggle để chạy full **3D U-Net / nnU-Net pipeline**.
+- Máy cá nhân (GTX 1650 Ti - 4GB): Dùng để viết code, debug DataLoader và chạy thử 1-2 batch với patch nhỏ ($64 \times 64 \times 32$).
+- Khi train chính thức: Thuê GPU trên **RunPod (RTX 3090 - 24GB VRAM, On-Demand)** với chi phí dự trù ~$10 USD (~250.000 VNĐ). Xem chi tiết tại: [server_pricing.md](file:///d:/03_University/Semester_7/PBL6/server_pricing.md).
 
 ---
 
 ## PHẦN 5: BẢNG BENCHMARK THỰC NGHIỆM TRÊN TẬP ISLES-2022
 
+Chi tiết xem tại tài liệu phân tích riêng: [Benchmark.md](file:///d:/03_University/Semester_7/PBL6/Benchmark.md).
+
 | Mô hình / Nhóm nghiên cứu | Năm | Chiều | Dice Score (↑) | Lesion F1 (↑) | Ghi chú kỹ thuật |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **2D U-Net (Vanilla Baseline)** | 2023 | 2D | 0.585 | 0.510 | Baseline lát cắt đơn, bỏ sót nhiều tổn thương nhỏ. |
-| **3D U-Net (Resampled 2mm)** | 2023 | 3D | 0.672 | 0.615 | Pipeline 3D cơ bản, khắc phục được liên kết lát cắt. |
-| **nnU-Net (Self-configuring)** | 2023 | 3D | **0.785** | **0.720** | Chuẩn vàng thách thức, tối ưu hóa tự động dữ liệu y tế. |
-| **Eff-SAM / Attention 3D U-Net** | 2024 | 3D | 0.760 | 0.705 | Tích hợp cơ chế Attention tập trung vào ổ vi nhồi máu. |
+| **Vanilla 3D U-Net** | 2023 | 3D | 0.672 | 0.615 | Pipeline 3D cơ bản, khắc phục được liên kết lát cắt. |
+| **SegResNet (MONAI)** | 2023 | 3D | 0.724 | 0.658 | Nhẹ nhất (~5GB VRAM), VAE branch chống overfit. |
+| **Attention 3D U-Net** | 2023 | 3D | 0.741 | 0.702 | Tích hợp Attention Gates bắt ổ vi nhồi máu. |
+| **nnU-Net v2 (Self-configuring)** | 2023 | 3D | **0.785** | **0.720** | **Chuẩn vàng thách thức (Gold Standard)**, tối ưu tự động. |
+| **MedNeXt (Chốt cho đề tài)** | **Late 2023** | **3D** | **0.795** | **0.738** | **ConvNeXt 3D Large Kernel (7x7x7)**, Receptive Field rộng như Transformer, train nhanh x1.8 nnU-Net. |
+
+---
+
+## PHẦN 6: PHÂN CÔNG VAI TRÒ MÔ HÌNH TRONG ĐỒ ÁN
+1. **Upper Benchmark (Mốc đối chứng trần):** `nnU-Net v2` (đại diện cho framework chuẩn mực).
+2. **Mô hình đề xuất cốt lõi (Core Contribution):** `MedNeXt` (tận dụng large-kernel 3D cho đột quỵ não).
+3. **Mô hình phụ trợ (Ablation / Fast Baseline):** `SegResNet` (làm mô hình suy luận nhẹ phục vụ demo web/API) và `Attention 3D U-Net` (kiểm chứng cơ chế chú ý).
+
