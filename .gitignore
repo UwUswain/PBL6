@@ -1,6 +1,6 @@
 # Data & Archives (Chặn cả data lẫn dataset nếu vô tình đặt tên)
 data/
-dataset/
+/dataset/
 *.nii
 *.nii.gz
 *.zip
