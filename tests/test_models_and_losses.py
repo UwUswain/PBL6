@@ -11,11 +11,13 @@ class TestLossesAndModels(unittest.TestCase):
     """Test suite for loss functions and neural network builders."""
 
     def test_loss_function_initialization(self) -> None:
-        """Verifies DiceFocalLoss initialization with expected attributes."""
+        """Verifies DiceJaccardLoss initialization with expected attributes."""
         loss_fn = get_loss_function()
-        self.assertFalse(loss_fn.dice.include_background)
-        self.assertTrue(loss_fn.dice.sigmoid)
-        self.assertTrue(loss_fn.dice.squared_pred)
+        self.assertFalse(loss_fn.dice_loss.include_background)
+        self.assertTrue(loss_fn.dice_loss.sigmoid)
+        self.assertTrue(loss_fn.dice_loss.squared_pred)
+        self.assertEqual(loss_fn.dice_weight, 0.5)
+        self.assertEqual(loss_fn.jaccard_weight, 0.5)
 
     def test_segresnet_forward_backward(self) -> None:
         """Verifies 3D SegResNet instantiation and gradient flow."""
