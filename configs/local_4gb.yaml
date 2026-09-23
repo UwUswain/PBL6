@@ -1,0 +1,10 @@
+experiment:
+  model_name: "segresnet"
+  max_epochs: 50
+  learning_rate: 0.001
+
+data:
+  roi_size: [96, 96, 32]
+  batch_size: 1
+  num_workers: 2
+  use_cache: false 

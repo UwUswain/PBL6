@@ -1,6 +1,7 @@
 """Main training script for ISLES-2022 stroke lesion segmentation.
 
-Orchestrates data loaders, model architecture, compound DiceJaccardLoss,
+Orchestrates MLOps YAML configuration loading, data loaders (CacheDataset / Dataset),
+model architectures (SegResNet, MedNeXt, SwinUNETR), compound SOTA DiceJaccardLoss,
 mixed-precision (AMP FP16) training, sliding-window validation, and checkpointing.
 """
 
@@ -19,12 +20,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import torch
 import torch.nn as nn
+import yaml
 from monai.inferers import sliding_window_inference
 
 from src.dataset.dataloader import build_kfold_dataloaders
 from src.losses.builder import get_loss_function
 from src.metrics.dice import compute_dice
-from src.models.builder import build_model
+from src.models.builder import get_model
 
 logger = logging.getLogger("train_engine")
 
@@ -38,6 +40,12 @@ def setup_logger(log_file: Path) -> None:
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
 
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     stream_handler.setLevel(logging.INFO)
@@ -49,19 +57,21 @@ def setup_logger(log_file: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parses training command-line arguments."""
-    parser = argparse.ArgumentParser(description="ISLES-2022 3D Segmentation Training Engine")
+    """Parses training command-line arguments, including the MLOps YAML config path."""
+    parser = argparse.ArgumentParser(
+        description="ISLES-2022 3D Stroke Lesion Segmentation Engine (MLOps Config)"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/local_4gb.yaml",
+        help="Path to YAML configuration file (e.g. configs/local_4gb.yaml, configs/pc_8gb.yaml).",
+    )
     parser.add_argument(
         "--data-dir",
         type=str,
         default="data/raw/ISLES-2022",
         help="Path to ISLES-2022 BIDS dataset root.",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="segresnet",
-        help="Model architecture ('segresnet' or 'mednext').",
     )
     parser.add_argument(
         "--fold",
@@ -76,58 +86,22 @@ def parse_args() -> argparse.Namespace:
         help="Total number of patient-level folds.",
     )
     parser.add_argument(
-        "--epochs",
-        type=int,
-        default=100,
-        help="Number of training epochs.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=2,
-        help="Batch size of 3D patches for training.",
-    )
-    parser.add_argument(
-        "--patch-h",
-        type=int,
-        default=96,
-        help="Patch height.",
-    )
-    parser.add_argument(
-        "--patch-w",
-        type=int,
-        default=96,
-        help="Patch width.",
-    )
-    parser.add_argument(
-        "--patch-d",
-        type=int,
-        default=32,
-        help="Patch depth (slices).",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-4,
-        help="Initial learning rate for AdamW.",
-    )
-    parser.add_argument(
         "--weight-decay",
         type=float,
         default=1e-5,
-        help="Weight decay for AdamW.",
+        help="Weight decay for AdamW optimizer.",
     )
     parser.add_argument(
         "--val-interval",
         type=int,
         default=1,
-        help="Epoch interval for validation evaluation.",
+        help="Epoch interval for sliding-window validation evaluation.",
     )
     parser.add_argument(
         "--save-dir",
         type=str,
         default="experiments/runs",
-        help="Directory to save checkpoints and logs.",
+        help="Directory to save experiment checkpoints and logs.",
     )
     parser.add_argument(
         "--no-amp",
@@ -138,12 +112,6 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Run a minimal smoke test (2 train batches, 1 val case) to verify pipeline.",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="Number of DataLoader background workers.",
     )
     parser.add_argument(
         "--sw-overlap",
@@ -159,7 +127,7 @@ def train_epoch(
     loader: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: torch.amp.GradScaler,
     device: torch.device,
     use_amp: bool,
     max_steps: int = 0,
@@ -266,67 +234,121 @@ def validate(
 
 
 def main() -> None:
-    """Main execution function for model training."""
+    """Main execution function for model training with MLOps config support."""
     args = parse_args()
 
-    # Determine execution device
+    # =========================================================================
+    # BƯỚC 1: ĐỌC VÀ PARSE CẤU HÌNH TỪ FILE YAML
+    # =========================================================================
+    # Kiểm tra đường dẫn file cấu hình YAML truyền từ CLI
+    config_path = Path(args.config).resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Không tìm thấy file cấu hình YAML tại: {config_path}")
+
+    # Đọc nội dung YAML và parse thành dictionary cfg bằng yaml.safe_load()
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    # 1. Trích xuất các tham số thực nghiệm (experiment) từ cfg:
+    # - model_name: Kiến trúc mạng ('segresnet', 'mednext', 'swin_unetr')
+    # - max_epochs: Số epoch huấn luyện tối đa
+    # - learning_rate: Tốc độ học khởi tạo cho Optimizer AdamW
+    model_name = str(cfg["experiment"]["model_name"])
+    max_epochs = int(cfg["experiment"]["max_epochs"])
+    learning_rate = float(cfg["experiment"]["learning_rate"])
+
+    # 2. Trích xuất và ép kiểu các tham số dữ liệu (data) từ cfg:
+    # - roi_size: Bắt buộc ép kiểu thành tuple (H, W, D) để truyền vào MONAI transforms
+    # - batch_size: Số lượng patch được đưa vào mỗi bước huấn luyện
+    # - num_workers: Số tiến trình CPU đọc và tiền xử lý dữ liệu ngầm
+    roi_size = tuple(cfg["data"]["roi_size"])
+    batch_size = int(cfg["data"]["batch_size"])
+    num_workers = int(cfg["data"]["num_workers"])
+
+    # 3. Logic CacheDataset: Dựa vào cờ cfg['data']['use_cache'], quyết định xem sẽ
+    # bọc dữ liệu bằng monai.data.CacheDataset (nếu True) hay monai.data.Dataset thông thường (nếu False).
+    # - Khi use_cache = True: Bộ nạp sẽ giữ toàn bộ hoặc một phần (cache_rate) dữ liệu đã tiền xử lý
+    #   trực tiếp trên bộ nhớ RAM. Giúp bỏ qua bước I/O từ ổ cứng ở mỗi epoch, tăng tốc độ 5-8 lần.
+    # - Khi use_cache = False: Bộ nạp sẽ xử lý on-the-fly trên từng batch, giúp tiết kiệm RAM tối đa.
+    use_cache = bool(cfg["data"].get("use_cache", False))
+    cache_rate = float(cfg["data"].get("cache_rate", 1.0 if use_cache else 0.5))
+
+    # =========================================================================
+    # BƯỚC 2: THIẾT LẬP THIẾT BỊ VÀ THƯ MỤC THỰC NGHIỆM
+    # =========================================================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and (device.type == "cuda")
 
-    # Setup experiment directory and logger
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"{args.model_name}_fold{args.fold}_{timestamp}"
+    exp_name = f"{model_name}_fold{args.fold}_{timestamp}"
     if args.dry_run:
         exp_name = f"dry_run_{exp_name}"
     run_dir = Path(args.save_dir).resolve() / exp_name
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(run_dir / "train.log")
 
-    patch_size = (args.patch_h, args.patch_w, args.patch_d)
-
     logger.info("=" * 75)
-    logger.info("ISLES-2022 TRAINING ENGINE")
+    logger.info("ISLES-2022 TRAINING ENGINE (MLOps Config Mode)")
     logger.info("=" * 75)
+    logger.info("Config file: %s", config_path)
     logger.info("Experiment run dir: %s", run_dir)
-    logger.info("Device: %s | AMP Enabled: %s", device, use_amp)
-    logger.info("Model: %s | Fold: %d/%d", args.model_name, args.fold, args.n_splits)
-    logger.info("Patch dimensions: %s | Batch size: %d", patch_size, args.batch_size)
-    logger.info("Learning rate: %.1e | Dry-run mode: %s", args.lr, args.dry_run)
+    logger.info("Device: %s | AMP FP16 Enabled: %s", device, use_amp)
+    logger.info("Model: %s | Fold: %d/%d", model_name, args.fold, args.n_splits)
+    logger.info("Patch dimensions (roi_size): %s | Batch size: %d", roi_size, batch_size)
+    logger.info("Num workers: %d | Use CacheDataset: %s (cache_rate: %.2f)", num_workers, use_cache, cache_rate)
+    logger.info("Max epochs: %d | Learning rate: %.1e | Dry-run: %s", max_epochs, learning_rate, args.dry_run)
 
-    # 1. Build DataLoaders
-    logger.info("Building Fold %d DataLoaders...", args.fold)
+    # =========================================================================
+    # BƯỚC 3: XÂY DỰNG DATALOADERS (BỌC CACHEDATASET HOẶC DATASET)
+    # =========================================================================
+    if use_cache:
+        logger.info(
+            "-> RAM Cache enabled: Wrapping data with monai.data.CacheDataset (cache_rate: %.2f)",
+            cache_rate,
+        )
+    else:
+        logger.info(
+            "-> RAM Cache disabled: Wrapping data with standard monai.data.Dataset for memory efficiency."
+        )
+
     train_loader, val_loader = build_kfold_dataloaders(
         data_dir=args.data_dir,
         fold=args.fold,
         n_splits=args.n_splits,
-        batch_size=args.batch_size,
-        patch_size=patch_size,
-        num_workers=args.num_workers,
-        use_cache=False,
+        batch_size=batch_size,
+        patch_size=roi_size,
+        num_workers=num_workers,
+        use_cache=use_cache,
+        cache_rate=cache_rate,
     )
 
-    # 2. Build Model
-    logger.info("Instantiating %s model (3 channels in, 1 channel out)...", args.model_name)
-    model = build_model(
-        model_name=args.model_name,
+    # =========================================================================
+    # BƯỚC 4: KHỞI TẠO MÔ HÌNH (MODEL ARCHITECTURE)
+    # =========================================================================
+    logger.info("Instantiating %s model (3 channels in, 1 channel out)...", model_name)
+    model = get_model(
+        model_name=model_name,
         in_channels=3,
         out_channels=1,
     ).to(device)
 
-    # 3. Setup Loss Function (SOTA DiceJaccardLoss)
+    # =========================================================================
+    # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS), OPTIMIZER VÀ SCHEDULER
+    # =========================================================================
     loss_fn = get_loss_function(include_background=False, sigmoid=True, squared_pred=True)
 
-    # 4. Setup Optimizer, Scheduler, and GradScaler
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
+        lr=learning_rate,
         weight_decay=args.weight_decay,
     )
-    total_epochs = 1 if args.dry_run else args.epochs
+    total_epochs = 1 if args.dry_run else max_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    # 5. Handle Dry-Run Mode
+    # =========================================================================
+    # BƯỚC 6: XỬ LÝ CHẾ ĐỘ THỬ NGHIỆM NHANH (DRY-RUN SMOKE TEST)
+    # =========================================================================
     if args.dry_run:
         logger.info("[DRY-RUN] Executing 2 training steps...")
         train_loss = train_epoch(
@@ -345,7 +367,7 @@ def main() -> None:
         val_dice, num_cases = validate(
             model=model,
             loader=val_loader,
-            patch_size=patch_size,
+            patch_size=roi_size,
             device=device,
             use_amp=use_amp,
             overlap=args.sw_overlap,
@@ -364,11 +386,13 @@ def main() -> None:
         )
         logger.info("[DRY-RUN] Checkpoint saved successfully at %s", checkpoint_path)
         logger.info("=" * 75)
-        logger.info("DRY-RUN PASSED 100%! The entire training pipeline is verified and ready.")
+        logger.info("DRY-RUN PASSED 100%%! Pipeline configured via %s is verified and ready.", config_path.name)
         logger.info("=" * 75)
         return
 
-    # 6. Standard Training Loop
+    # =========================================================================
+    # BƯỚC 7: VÒNG LẶP HUẤN LUYỆN CHUẨN (STANDARD TRAINING & VALIDATION LOOP)
+    # =========================================================================
     best_dice = -1.0
     val_dice = 0.0
     start_time = time.time()
@@ -403,13 +427,13 @@ def main() -> None:
             optimizer.param_groups[0]["lr"],
         )
 
-        # Validation Step
+        # Đánh giá Validation định kỳ
         if epoch % args.val_interval == 0 or epoch == total_epochs:
             val_start = time.time()
             val_dice, num_cases = validate(
                 model=model,
                 loader=val_loader,
-                patch_size=patch_size,
+                patch_size=roi_size,
                 device=device,
                 use_amp=use_amp,
                 overlap=args.sw_overlap,
@@ -424,7 +448,7 @@ def main() -> None:
                 num_cases,
             )
 
-            # Checkpoint: Best model
+            # Lưu checkpoint tốt nhất (Best Metric)
             if val_dice > best_dice:
                 best_dice = val_dice
                 best_model_path = run_dir / "best_metric_model.pth"
@@ -443,7 +467,7 @@ def main() -> None:
                     best_model_path,
                 )
 
-        # Checkpoint: Latest checkpoint
+        # Lưu checkpoint gần nhất ở mỗi epoch (Last Checkpoint)
         latest_path = run_dir / "last_checkpoint.pth"
         torch.save(
             {

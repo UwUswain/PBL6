@@ -4,7 +4,7 @@ import unittest
 import torch
 
 from src.losses.builder import get_loss_function
-from src.models.builder import build_model
+from src.models.builder import build_model, get_model
 
 
 class TestLossesAndModels(unittest.TestCase):
@@ -34,15 +34,20 @@ class TestLossesAndModels(unittest.TestCase):
         loss.backward()
         self.assertFalse(torch.isnan(loss).item())
 
-    def test_mednext_not_implemented(self) -> None:
-        """Verifies NotImplementedError for MedNeXt placeholder."""
-        with self.assertRaises(NotImplementedError):
-            build_model("mednext")
+    def test_mednext_initialization(self) -> None:
+        """Verifies MedNeXt Large Kernel instantiation."""
+        model = get_model("mednext", in_channels=3, out_channels=1, init_filters=16)
+        self.assertEqual(model.__class__.__name__, "MedNeXt")
+
+    def test_swin_unetr_initialization(self) -> None:
+        """Verifies SwinUNETR instantiation."""
+        model = get_model("swin_unetr", in_channels=3, out_channels=1)
+        self.assertEqual(model.__class__.__name__, "SwinUNETR")
 
     def test_unsupported_model(self) -> None:
         """Verifies ValueError for unknown model names."""
         with self.assertRaises(ValueError):
-            build_model("unsupported_model_xyz")
+            get_model("unsupported_model_xyz")
 
 
 if __name__ == "__main__":

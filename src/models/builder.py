@@ -2,12 +2,12 @@
 
 import logging
 import torch.nn as nn
-from monai.networks.nets import SegResNet
+from monai.networks.nets import MedNeXt, SegResNet, SwinUNETR
 
 logger = logging.getLogger(__name__)
 
 
-def build_model(
+def get_model(
     model_name: str = "segresnet",
     in_channels: int = 3,
     out_channels: int = 1,
@@ -16,7 +16,7 @@ def build_model(
     """Builds and returns the requested 3D segmentation network.
 
     Args:
-        model_name: Name of the architecture ('segresnet' or 'mednext').
+        model_name: Name of the architecture ('segresnet', 'mednext', 'swin_unetr').
         in_channels: Number of input MRI modalities (default: 3 for DWI, ADC, FLAIR).
         out_channels: Number of segmentation output channels (default: 1 for binary lesion mask).
         **kwargs: Additional hyperparameters passed to the model constructor.
@@ -25,7 +25,6 @@ def build_model(
         nn.Module: Instantiated PyTorch/MONAI model.
 
     Raises:
-        NotImplementedError: If model_name is 'mednext' (pending custom integration).
         ValueError: If model_name is not supported.
     """
     normalized_name = model_name.lower().strip()
@@ -42,12 +41,37 @@ def build_model(
             out_channels=out_channels,
             **kwargs,
         )
+    elif normalized_name == "mednext":
+        logger.info(
+            "Building MedNeXt 3D Large Kernel (in_channels=%d, out_channels=%d)",
+            in_channels,
+            out_channels,
+        )
+        kernel_size = kwargs.pop("kernel_size", 7)
+        return MedNeXt(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            **kwargs,
+        )
+    elif normalized_name == "swin_unetr":
+        logger.info(
+            "Building SwinUNETR 3D (in_channels=%d, out_channels=%d)",
+            in_channels,
+            out_channels,
+        )
+        return SwinUNETR(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported model_name: '{model_name}'. Available options: 'segresnet', 'mednext', 'swin_unetr'."
+        )
 
-    if normalized_name == "mednext":
-        message = "MedNeXt sẽ được tích hợp custom module ở chặng sau"
-        logger.warning(message)
-        raise NotImplementedError(message)
 
-    raise ValueError(
-        f"Unsupported model_name: '{model_name}'. Available options: 'segresnet', 'mednext'."
-    )
+# Backward-compatible alias
+build_model = get_model

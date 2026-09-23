@@ -4,6 +4,11 @@ from typing import Sequence, Tuple, Union
 import monai.transforms as mt
 
 
+def _binarize_mask(m):
+    """Ensures binary mask values {0, 1} while remaining picklable for multiprocessing."""
+    return (m > 0).to(dtype=m.dtype) if hasattr(m, "to") else (m > 0).astype(m.dtype)
+
+
 def get_train_transforms(
     patch_size: Tuple[int, int, int] = (96, 96, 32),
     target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
@@ -48,7 +53,7 @@ def get_train_transforms(
         # 5. Ensure binary mask values {0, 1}
         mt.Lambdad(
             keys=["mask"],
-            func=lambda m: (m > 0).to(dtype=m.dtype) if hasattr(m, "to") else (m > 0).astype(m.dtype),
+            func=_binarize_mask,
         ),
         # 6. Standardize voxel spacing to isotropic (1.0, 1.0, 1.0) mm
         mt.Spacingd(
@@ -122,7 +127,7 @@ def get_val_transforms(
         # 5. Ensure binary mask values {0, 1}
         mt.Lambdad(
             keys=["mask"],
-            func=lambda m: (m > 0).to(dtype=m.dtype) if hasattr(m, "to") else (m > 0).astype(m.dtype),
+            func=_binarize_mask,
         ),
         # 6. Standardize voxel spacing to isotropic (1.0, 1.0, 1.0) mm
         mt.Spacingd(
