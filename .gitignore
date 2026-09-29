@@ -37,3 +37,7 @@ Thumbs.db
 
 results/
 reserve/
+
+# Local dataset and nested source copy
+/ISLES-2022/
+/PBL6-main/
