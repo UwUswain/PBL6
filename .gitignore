@@ -14,7 +14,6 @@ docs/phuc/
 *.docx
 
 # Checkpoints & Experiments
-experiments/runs/
 *.pth
 *.pt
 *.onnx
@@ -41,3 +40,10 @@ reserve/
 # Local dataset and nested source copy
 /ISLES-2022/
 /PBL6-main/
+
+# Local training runs
+experiments/runs/
+
+!experiments/results/
+!experiments/results/*.md
+
