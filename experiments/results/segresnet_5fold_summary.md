@@ -41,3 +41,8 @@
 The five folds were trained independently. The best checkpoint from one fold was not used to initialize another fold.
 
 Training checkpoints and raw training logs remain local under experiments/runs/ and are intentionally excluded from Git.
+
+
+## Accessing Checkpoints
+Due to GitHub's file size limitations, the raw `best_metric_model.pth` weights and `train.log` files for all folds are excluded from this repository via `.gitignore`
+Team members can access the pre-trained weights (~500MB total) via our shared Google Drive folder: 
