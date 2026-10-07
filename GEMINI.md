@@ -17,3 +17,13 @@
 - Giữ nguyên cấu trúc: Dữ liệu gốc bất biến tại `data/raw/ISLES-2022/`.
 - Reusable modules đặt tại `src/`, các entry point CLI đặt tại `scripts/`, các thực nghiệm đặt tại `experiments/`.
 - Code & comments bằng tiếng Anh, giải thích logic bằng tiếng Việt. Tuân thủ PEP8 và Clean Code.
+
+## 4. MULTI-DEV COLLABORATION & GIT HYGIENE (STRICT ENFORCEMENT)
+- **Zero-Junk Policy:** Tuyệt đối KHÔNG tự ý tạo các file snapshot, file backup cá nhân (ví dụ: `requirements_before_cuda.txt`, `temp.py`, `*.bak`, `*.tmp`). Mọi AI assistant (Antigravity/Cursor) trên bất kỳ máy nào thuộc nhóm BẮT BUỘC tuân thủ nghiêm ngặt quy tắc này.
+- **Single Source of Truth for Dependencies:** File môi trường duy nhất là `requirements.txt`. Tuyệt đối KHÔNG chạy `pip freeze > ...` rồi đẩy lên Git để tránh lỗi mã hóa UTF-16LE và rác đường dẫn cục bộ (`file:///...`).
+- **Standardized Training Execution:** Mọi lượt huấn luyện BẮT BUỘC phải thực thi qua CLI chuẩn:
+  `python scripts/train.py --config configs/<file>.yaml --fold <0-4>`
+  Tuyệt đối không tự ý tạo thêm script train rời rạc bên ngoài `scripts/train.py`.
+- **Large Artifacts Isolation:** Tuyệt đối KHÔNG can thiệp `.gitignore` để commit file trọng số (`*.pth`, `*.pt`, `*.onnx`). Toàn bộ checkpoints phải nằm cục bộ trong `experiments/runs/` (đã được cấu hình ẩn khỏi Git).
+- **Results Sync:** Chỉ commit các file báo cáo tổng hợp dạng Markdown (`.md`) nằm trong thư mục `experiments/results/`.
+
