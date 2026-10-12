@@ -272,6 +272,7 @@ def main() -> None:
     # - Khi use_cache = False: Bộ nạp sẽ xử lý on-the-fly trên từng batch, giúp tiết kiệm RAM tối đa.
     use_cache = bool(cfg["data"].get("use_cache", False))
     cache_rate = float(cfg["data"].get("cache_rate", 1.0 if use_cache else 0.5))
+    use_edwi = bool(cfg["data"].get("use_edwi", False))
 
     # =========================================================================
     # BƯỚC 2: THIẾT LẬP THIẾT BỊ VÀ THƯ MỤC THỰC NGHIỆM
@@ -294,6 +295,7 @@ def main() -> None:
     logger.info("Experiment run dir: %s", run_dir)
     logger.info("Device: %s | AMP FP16 Enabled: %s", device, use_amp)
     logger.info("Model: %s | Fold: %d/%d", model_name, args.fold, args.n_splits)
+    logger.info("Input modalities: %s", "[DWI + ADC + eDWI (CLAHE)]" if use_edwi else "[DWI + ADC + FLAIR]")
     logger.info("Patch dimensions (roi_size): %s | Batch size: %d", roi_size, batch_size)
     logger.info("Num workers: %d | Use CacheDataset: %s (cache_rate: %.2f)", num_workers, use_cache, cache_rate)
     logger.info("Max epochs: %d | Learning rate: %.1e | Dry-run: %s", max_epochs, learning_rate, args.dry_run)
@@ -320,6 +322,7 @@ def main() -> None:
         num_workers=num_workers,
         use_cache=use_cache,
         cache_rate=cache_rate,
+        use_edwi=use_edwi,
     )
 
     # =========================================================================

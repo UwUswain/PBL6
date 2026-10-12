@@ -1,0 +1,3 @@
+case_id,dsc,avd_ml,lcd,lesion_f1,lesion_precision,lesion_recall,pred_volume_ml,gt_volume_ml,pred_lesion_count,gt_lesion_count
+single_fold0_case00,0.4963350785340314,1.4049999999999998,31,0.15384615384615383,0.08571428571428572,0.75,4.045,2.64,35,4
+single_fold0_case01,0.021953896816684963,6.186000000000001,67,0.0,0.0,0.0,9.47,3.284,76,9

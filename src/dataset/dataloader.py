@@ -67,12 +67,17 @@ def build_kfold_dataloaders(
 
     # 3. Instantiate transform pipelines from Task 2
     num_samples = kwargs.get("num_samples_per_volume", 2)
+    use_edwi = kwargs.get("use_edwi", False)
     train_transforms = get_train_transforms(
         patch_size=patch_size,
         target_spacing=target_spacing,
         num_samples=num_samples,
+        use_edwi=use_edwi,
     )
-    val_transforms = get_val_transforms(target_spacing=target_spacing)
+    val_transforms = get_val_transforms(
+        target_spacing=target_spacing,
+        use_edwi=use_edwi,
+    )
 
     # 4. Construct Datasets
     if use_cache:
