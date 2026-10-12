@@ -1,12 +1,86 @@
 """MONAI data transforms for multi-modal 3D MRI preprocessing in ISLES-2022."""
 
 from typing import Sequence, Tuple, Union
+import cv2
+import monai.data as md
 import monai.transforms as mt
+import numpy as np
+import torch
 
 
 def _binarize_mask(m):
     """Ensures binary mask values {0, 1} while remaining picklable for multiprocessing."""
     return (m > 0).to(dtype=m.dtype) if hasattr(m, "to") else (m > 0).astype(m.dtype)
+
+
+class GenerateEnhancedDWId(mt.MapTransform):
+    """Generates an enhanced DWI (eDWI) channel using slice-wise CLAHE.
+
+    Applies Contrast Limited Adaptive Histogram Equalization across axial slices
+    to amplify local contrast and delineate punctate ischemic stroke lesions.
+    """
+
+    def __init__(
+        self,
+        keys: Sequence[str] = ("dwi",),
+        output_key: str = "edwi",
+        clip_limit: float = 2.0,
+        tile_grid_size: Tuple[int, int] = (8, 8),
+        allow_missing_keys: bool = False,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self.output_key = output_key
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            dwi_obj = d[key]
+            # Convert to numpy if tensor
+            is_tensor = hasattr(dwi_obj, "cpu")
+            if is_tensor:
+                arr = dwi_obj.detach().cpu().numpy()
+            else:
+                arr = np.array(dwi_obj)
+
+            channel_first = (arr.ndim == 4)
+            work_arr = arr[0] if channel_first else arr
+
+            # Create CLAHE instance per call to ensure safe multiprocessing pickling
+            clahe = cv2.createCLAHE(
+                clipLimit=self.clip_limit,
+                tileGridSize=self.tile_grid_size,
+            )
+            edwi = np.zeros_like(work_arr, dtype=np.float32)
+
+            # Process slice-by-slice along axial dimension (axis 0 = D)
+            for z in range(work_arr.shape[0]):
+                sl = work_arr[z]
+                sl_min, sl_max = float(sl.min()), float(sl.max())
+                if (sl_max - sl_min) > 1e-5 and np.count_nonzero(sl > sl_min) > 20:
+                    sl_u8 = ((sl - sl_min) / (sl_max - sl_min) * 255.0).clip(0, 255).astype(np.uint8)
+                    edwi_sl = clahe.apply(sl_u8).astype(np.float32) / 255.0
+                    edwi[z] = edwi_sl
+                else:
+                    edwi[z] = 0.0
+
+            if channel_first:
+                edwi = edwi[np.newaxis, ...]
+
+            if hasattr(md, "MetaTensor") and isinstance(dwi_obj, md.MetaTensor):
+                d[self.output_key] = md.MetaTensor(
+                    torch.from_numpy(edwi).to(dtype=dwi_obj.dtype, device=dwi_obj.device),
+                    meta=dwi_obj.meta,
+                )
+            elif is_tensor:
+                d[self.output_key] = torch.from_numpy(edwi).to(
+                    dtype=dwi_obj.dtype,
+                    device=dwi_obj.device,
+                )
+            else:
+                d[self.output_key] = edwi
+        return d
 
 
 def get_train_transforms(
@@ -15,41 +89,45 @@ def get_train_transforms(
     num_samples: int = 2,
     pos_ratio: float = 1.0,
     neg_ratio: float = 1.0,
+    use_edwi: bool = False,
+    clip_limit: float = 2.0,
+    tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
     """Builds the training transform pipeline with patch-based sampling and augmentation.
 
-    Pipeline:
-        1. Load DWI, ADC, FLAIR, and MASK.
-        2. Resample FLAIR to match DWI reference coordinate grid (ResampleToMatchd).
-        3. Concatenate DWI, ADC, FLAIR into a single 3-channel tensor 'image' [3, D, H, W].
-        4. Delete individual modality keys to minimize memory overhead.
-        5. Guarantee strictly binary mask {0, 1}.
-        6. Resample 'image' (bilinear) and 'mask' (nearest) to isometric target spacing (1.0mm).
-        7. Channel-wise non-zero Z-score intensity normalization.
-        8. Spatial zero-padding if volume dimensions are smaller than patch_size.
-        9. Balanced 3D patch cropping (RandCropByPosNegLabeld) to overcome stroke class imbalance.
-        10. Random 3D spatial flipping augmentations.
-        11. Convert to PyTorch Tensor.
-
-    Args:
-        patch_size: 3D dimensions for patch cropping (H, W, D), e.g. (96, 96, 32).
-        target_spacing: Isotropic voxel spacing in mm, default (1.0, 1.0, 1.0).
-        num_samples: Number of cropped patches per 3D volume per iteration.
-        pos_ratio: Proportion of patches centered on stroke lesion foreground voxels.
-        neg_ratio: Proportion of patches centered on background voxels.
-
-    Returns:
-        mt.Compose: MONAI training transform pipeline.
+    Pipeline options:
+    - Default (use_edwi=False): Load DWI, ADC, FLAIR (resampled to DWI grid) -> [3, D, H, W]
+    - SOTA eDWI (use_edwi=True): Load DWI, ADC -> generate eDWI via CLAHE -> [3, D, H, W]
     """
-    return mt.Compose([
-        # 1. Load multi-modal NIfTI files (channel-first)
-        mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
-        # 2. Resample high-resolution FLAIR to align with DWI coordinate space
-        mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
-        # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
-        mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
-        # 4. Remove individual modality keys
-        mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
+    if use_edwi:
+        load_and_fuse_steps = [
+            # 1. Load DWI, ADC, and MASK (FLAIR is replaced by eDWI)
+            mt.LoadImaged(keys=["dwi", "adc", "mask"], ensure_channel_first=True),
+            # 2. Synthesize enhanced DWI (eDWI) via slice-wise CLAHE
+            GenerateEnhancedDWId(
+                keys=["dwi"],
+                output_key="edwi",
+                clip_limit=clip_limit,
+                tile_grid_size=tile_grid_size,
+            ),
+            # 3. Concatenate DWI, ADC, eDWI into 3-channel tensor 'image' [3, D, H, W]
+            mt.ConcatItemsd(keys=["dwi", "adc", "edwi"], name="image", dim=0),
+            # 4. Remove individual modality keys
+            mt.DeleteItemsd(keys=["dwi", "adc", "edwi"]),
+        ]
+    else:
+        load_and_fuse_steps = [
+            # 1. Load multi-modal NIfTI files (channel-first)
+            mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
+            # 2. Resample high-resolution FLAIR to align with DWI coordinate space
+            mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
+            # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
+            mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
+            # 4. Remove individual modality keys
+            mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
+        ]
+
+    common_steps = [
         # 5. Ensure binary mask values {0, 1}
         mt.Lambdad(
             keys=["mask"],
@@ -74,7 +152,7 @@ def get_train_transforms(
             mode="constant",
             constant_values=0,
         ),
-        # 9. Balanced Pos/Neg patch cropping to prevent VRAM OOM and address class imbalance
+        # 9. Balanced Pos/Neg patch cropping to overcome stroke class imbalance
         mt.RandCropByPosNegLabeld(
             keys=["image", "mask"],
             label_key="mask",
@@ -91,39 +169,47 @@ def get_train_transforms(
         mt.RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=2),
         # 11. Ensure clean PyTorch tensors
         mt.EnsureTyped(keys=["image", "mask"], data_type="tensor", track_meta=False),
-    ])
+    ]
+
+    return mt.Compose(load_and_fuse_steps + common_steps)
 
 
 def get_val_transforms(
     target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    use_edwi: bool = False,
+    clip_limit: float = 2.0,
+    tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
-    """Builds the validation and inference transform pipeline for full 3D volumes.
+    """Builds the validation and inference transform pipeline for full 3D volumes."""
+    if use_edwi:
+        load_and_fuse_steps = [
+            # 1. Load DWI, ADC, and MASK (FLAIR is replaced by eDWI)
+            mt.LoadImaged(keys=["dwi", "adc", "mask"], ensure_channel_first=True),
+            # 2. Synthesize enhanced DWI (eDWI) via slice-wise CLAHE
+            GenerateEnhancedDWId(
+                keys=["dwi"],
+                output_key="edwi",
+                clip_limit=clip_limit,
+                tile_grid_size=tile_grid_size,
+            ),
+            # 3. Concatenate DWI, ADC, eDWI into 3-channel tensor 'image' [3, D, H, W]
+            mt.ConcatItemsd(keys=["dwi", "adc", "edwi"], name="image", dim=0),
+            # 4. Remove individual modality keys
+            mt.DeleteItemsd(keys=["dwi", "adc", "edwi"]),
+        ]
+    else:
+        load_and_fuse_steps = [
+            # 1. Load multi-modal NIfTI files (channel-first)
+            mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
+            # 2. Resample high-resolution FLAIR to align with DWI coordinate space
+            mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
+            # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
+            mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
+            # 4. Remove individual modality keys
+            mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
+        ]
 
-    Pipeline:
-        1. Load DWI, ADC, FLAIR, and MASK.
-        2. Resample FLAIR to match DWI reference coordinate grid (ResampleToMatchd).
-        3. Concatenate DWI, ADC, FLAIR into a single 3-channel tensor 'image' [3, D, H, W].
-        4. Delete individual modality keys to minimize memory overhead.
-        5. Guarantee strictly binary mask {0, 1}.
-        6. Resample 'image' (bilinear) and 'mask' (nearest) to isometric target spacing (1.0mm).
-        7. Channel-wise non-zero Z-score intensity normalization.
-        8. Convert to PyTorch Tensor.
-
-    Args:
-        target_spacing: Isotropic voxel spacing in mm, default (1.0, 1.0, 1.0).
-
-    Returns:
-        mt.Compose: MONAI validation transform pipeline.
-    """
-    return mt.Compose([
-        # 1. Load multi-modal NIfTI files (channel-first)
-        mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
-        # 2. Resample high-resolution FLAIR to align with DWI coordinate space
-        mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
-        # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
-        mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
-        # 4. Remove individual modality keys
-        mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
+    common_steps = [
         # 5. Ensure binary mask values {0, 1}
         mt.Lambdad(
             keys=["mask"],
@@ -143,7 +229,9 @@ def get_val_transforms(
         ),
         # 8. Ensure clean PyTorch tensors
         mt.EnsureTyped(keys=["image", "mask"], data_type="tensor", track_meta=False),
-    ])
+    ]
+
+    return mt.Compose(load_and_fuse_steps + common_steps)
 
 
 def get_isles_transforms(
@@ -153,6 +241,9 @@ def get_isles_transforms(
     num_samples: int = 2,
     pos_ratio: float = 1.0,
     neg_ratio: float = 1.0,
+    use_edwi: bool = False,
+    clip_limit: float = 2.0,
+    tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
     """Convenience factory routing to get_train_transforms or get_val_transforms."""
     mode_normalized = mode.lower().strip()
@@ -163,7 +254,15 @@ def get_isles_transforms(
             num_samples=num_samples,
             pos_ratio=pos_ratio,
             neg_ratio=neg_ratio,
+            use_edwi=use_edwi,
+            clip_limit=clip_limit,
+            tile_grid_size=tile_grid_size,
         )
     elif mode_normalized in ("val", "infer"):
-        return get_val_transforms(target_spacing=target_spacing)
+        return get_val_transforms(
+            target_spacing=target_spacing,
+            use_edwi=use_edwi,
+            clip_limit=clip_limit,
+            tile_grid_size=tile_grid_size,
+        )
     raise ValueError(f"Invalid mode: '{mode}'. Must be 'train', 'val', or 'infer'.")
