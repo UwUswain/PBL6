@@ -265,14 +265,24 @@ def main() -> None:
     batch_size = int(cfg["data"]["batch_size"])
     num_workers = int(cfg["data"]["num_workers"])
 
-    # 3. Logic CacheDataset: Dựa vào cờ cfg['data']['use_cache'], quyết định xem sẽ
-    # bọc dữ liệu bằng monai.data.CacheDataset (nếu True) hay monai.data.Dataset thông thường (nếu False).
-    # - Khi use_cache = True: Bộ nạp sẽ giữ toàn bộ hoặc một phần (cache_rate) dữ liệu đã tiền xử lý
-    #   trực tiếp trên bộ nhớ RAM. Giúp bỏ qua bước I/O từ ổ cứng ở mỗi epoch, tăng tốc độ 5-8 lần.
-    # - Khi use_cache = False: Bộ nạp sẽ xử lý on-the-fly trên từng batch, giúp tiết kiệm RAM tối đa.
+    # 3. Logic CacheDataset và Modalities (Hỗ trợ 2 kênh DWI+ADC hoặc 3 kênh DWI+ADC+FLAIR/eDWI)
     use_cache = bool(cfg["data"].get("use_cache", False))
     cache_rate = float(cfg["data"].get("cache_rate", 1.0 if use_cache else 0.5))
     use_edwi = bool(cfg["data"].get("use_edwi", False))
+
+    modalities = cfg["data"].get("modalities", None)
+    cfg_channels = cfg["experiment"].get("in_channels", cfg["data"].get("in_channels", None))
+    if modalities is not None:
+        in_channels = int(cfg_channels) if cfg_channels is not None else len(modalities)
+    elif cfg_channels is not None:
+        in_channels = int(cfg_channels)
+        if in_channels == 2:
+            modalities = ["dwi", "adc"]
+        else:
+            modalities = ["dwi", "adc", "flair"]
+    else:
+        in_channels = 3
+        modalities = ["dwi", "adc", "flair"]
 
     # =========================================================================
     # BƯỚC 2: THIẾT LẬP THIẾT BỊ VÀ THƯ MỤC THỰC NGHIỆM
@@ -288,6 +298,13 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(run_dir / "train.log")
 
+    if use_edwi:
+        modality_desc = "[DWI + ADC + eDWI (CLAHE)]"
+    elif modalities == ["dwi", "adc"]:
+        modality_desc = "[DWI + ADC] (2 channels - SOTA Diffusion restricted)"
+    else:
+        modality_desc = f"[{' + '.join([str(m).upper() for m in modalities])}] ({in_channels} channels)"
+
     logger.info("=" * 75)
     logger.info("ISLES-2022 TRAINING ENGINE (MLOps Config Mode)")
     logger.info("=" * 75)
@@ -295,7 +312,7 @@ def main() -> None:
     logger.info("Experiment run dir: %s", run_dir)
     logger.info("Device: %s | AMP FP16 Enabled: %s", device, use_amp)
     logger.info("Model: %s | Fold: %d/%d", model_name, args.fold, args.n_splits)
-    logger.info("Input modalities: %s", "[DWI + ADC + eDWI (CLAHE)]" if use_edwi else "[DWI + ADC + FLAIR]")
+    logger.info("Input modalities: %s", modality_desc)
     logger.info("Patch dimensions (roi_size): %s | Batch size: %d", roi_size, batch_size)
     logger.info("Num workers: %d | Use CacheDataset: %s (cache_rate: %.2f)", num_workers, use_cache, cache_rate)
     logger.info("Max epochs: %d | Learning rate: %.1e | Dry-run: %s", max_epochs, learning_rate, args.dry_run)
@@ -323,15 +340,17 @@ def main() -> None:
         use_cache=use_cache,
         cache_rate=cache_rate,
         use_edwi=use_edwi,
+        modalities=modalities,
+        in_channels=in_channels,
     )
 
     # =========================================================================
     # BƯỚC 4: KHỞI TẠO MÔ HÌNH (MODEL ARCHITECTURE)
     # =========================================================================
-    logger.info("Instantiating %s model (3 channels in, 1 channel out)...", model_name)
+    logger.info("Instantiating %s model (%d channels in, 1 channel out)...", model_name, in_channels)
     model = get_model(
         model_name=model_name,
-        in_channels=3,
+        in_channels=in_channels,
         out_channels=1,
     ).to(device)
 

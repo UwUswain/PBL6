@@ -1,6 +1,6 @@
 """MONAI data transforms for multi-modal 3D MRI preprocessing in ISLES-2022."""
 
-from typing import Sequence, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 import cv2
 import monai.data as md
 import monai.transforms as mt
@@ -83,24 +83,21 @@ class GenerateEnhancedDWId(mt.MapTransform):
         return d
 
 
-def get_train_transforms(
-    patch_size: Tuple[int, int, int] = (96, 96, 32),
-    target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-    num_samples: int = 2,
-    pos_ratio: float = 1.0,
-    neg_ratio: float = 1.0,
+def _build_load_and_fuse_steps(
+    modalities: Optional[Sequence[str]] = None,
     use_edwi: bool = False,
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
-) -> mt.Compose:
-    """Builds the training transform pipeline with patch-based sampling and augmentation.
+) -> list:
+    """Constructs dynamic multi-modal loading and fusion steps.
 
-    Pipeline options:
-    - Default (use_edwi=False): Load DWI, ADC, FLAIR (resampled to DWI grid) -> [3, D, H, W]
+    Supported modes:
     - SOTA eDWI (use_edwi=True): Load DWI, ADC -> generate eDWI via CLAHE -> [3, D, H, W]
+    - 2-Channel (modalities=['dwi', 'adc']): Load DWI, ADC -> [2, D, H, W] (Skips FLAIR I/O)
+    - 3-Channel Default (modalities=['dwi', 'adc', 'flair']): Load DWI, ADC, FLAIR (resample FLAIR) -> [3, D, H, W]
     """
     if use_edwi:
-        load_and_fuse_steps = [
+        return [
             # 1. Load DWI, ADC, and MASK (FLAIR is replaced by eDWI)
             mt.LoadImaged(keys=["dwi", "adc", "mask"], ensure_channel_first=True),
             # 2. Synthesize enhanced DWI (eDWI) via slice-wise CLAHE
@@ -115,17 +112,55 @@ def get_train_transforms(
             # 4. Remove individual modality keys
             mt.DeleteItemsd(keys=["dwi", "adc", "edwi"]),
         ]
-    else:
-        load_and_fuse_steps = [
+
+    mods = list(modalities) if modalities is not None else ["dwi", "adc", "flair"]
+
+    if "flair" in mods and "dwi" in mods:
+        return [
             # 1. Load multi-modal NIfTI files (channel-first)
-            mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
+            mt.LoadImaged(keys=mods + ["mask"], ensure_channel_first=True),
             # 2. Resample high-resolution FLAIR to align with DWI coordinate space
             mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
-            # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
-            mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
+            # 3. Concatenate modalities along channel axis -> shape [C, D, H, W]
+            mt.ConcatItemsd(keys=mods, name="image", dim=0),
             # 4. Remove individual modality keys
-            mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
+            mt.DeleteItemsd(keys=mods),
         ]
+    else:
+        return [
+            # 1. Load specified modalities (e.g., ['dwi', 'adc']) skipping unused files
+            mt.LoadImaged(keys=mods + ["mask"], ensure_channel_first=True),
+            # 2. Concatenate directly along channel axis -> shape [C, D, H, W]
+            mt.ConcatItemsd(keys=mods, name="image", dim=0),
+            # 3. Remove individual modality keys
+            mt.DeleteItemsd(keys=mods),
+        ]
+
+
+def get_train_transforms(
+    patch_size: Tuple[int, int, int] = (96, 96, 32),
+    target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    num_samples: int = 2,
+    pos_ratio: float = 1.0,
+    neg_ratio: float = 1.0,
+    use_edwi: bool = False,
+    modalities: Optional[Sequence[str]] = None,
+    clip_limit: float = 2.0,
+    tile_grid_size: Tuple[int, int] = (8, 8),
+) -> mt.Compose:
+    """Builds the training transform pipeline with patch-based sampling and augmentation.
+
+    Pipeline options:
+    - Default (3-channel): Load DWI, ADC, FLAIR -> [3, D, H, W]
+    - 2-Channel: Load DWI, ADC -> [2, D, H, W]
+    - eDWI: Load DWI, ADC -> generate eDWI via CLAHE -> [3, D, H, W]
+    """
+    load_and_fuse_steps = _build_load_and_fuse_steps(
+        modalities=modalities,
+        use_edwi=use_edwi,
+        clip_limit=clip_limit,
+        tile_grid_size=tile_grid_size,
+    )
 
     common_steps = [
         # 5. Ensure binary mask values {0, 1}
@@ -177,37 +212,17 @@ def get_train_transforms(
 def get_val_transforms(
     target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     use_edwi: bool = False,
+    modalities: Optional[Sequence[str]] = None,
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
     """Builds the validation and inference transform pipeline for full 3D volumes."""
-    if use_edwi:
-        load_and_fuse_steps = [
-            # 1. Load DWI, ADC, and MASK (FLAIR is replaced by eDWI)
-            mt.LoadImaged(keys=["dwi", "adc", "mask"], ensure_channel_first=True),
-            # 2. Synthesize enhanced DWI (eDWI) via slice-wise CLAHE
-            GenerateEnhancedDWId(
-                keys=["dwi"],
-                output_key="edwi",
-                clip_limit=clip_limit,
-                tile_grid_size=tile_grid_size,
-            ),
-            # 3. Concatenate DWI, ADC, eDWI into 3-channel tensor 'image' [3, D, H, W]
-            mt.ConcatItemsd(keys=["dwi", "adc", "edwi"], name="image", dim=0),
-            # 4. Remove individual modality keys
-            mt.DeleteItemsd(keys=["dwi", "adc", "edwi"]),
-        ]
-    else:
-        load_and_fuse_steps = [
-            # 1. Load multi-modal NIfTI files (channel-first)
-            mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
-            # 2. Resample high-resolution FLAIR to align with DWI coordinate space
-            mt.ResampleToMatchd(keys=["flair"], key_dst="dwi", mode="bilinear"),
-            # 3. Concatenate modalities along channel axis -> shape [3, D, H, W]
-            mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
-            # 4. Remove individual modality keys
-            mt.DeleteItemsd(keys=["dwi", "adc", "flair"]),
-        ]
+    load_and_fuse_steps = _build_load_and_fuse_steps(
+        modalities=modalities,
+        use_edwi=use_edwi,
+        clip_limit=clip_limit,
+        tile_grid_size=tile_grid_size,
+    )
 
     common_steps = [
         # 5. Ensure binary mask values {0, 1}
@@ -242,6 +257,7 @@ def get_isles_transforms(
     pos_ratio: float = 1.0,
     neg_ratio: float = 1.0,
     use_edwi: bool = False,
+    modalities: Optional[Sequence[str]] = None,
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
@@ -255,6 +271,7 @@ def get_isles_transforms(
             pos_ratio=pos_ratio,
             neg_ratio=neg_ratio,
             use_edwi=use_edwi,
+            modalities=modalities,
             clip_limit=clip_limit,
             tile_grid_size=tile_grid_size,
         )
@@ -262,6 +279,7 @@ def get_isles_transforms(
         return get_val_transforms(
             target_spacing=target_spacing,
             use_edwi=use_edwi,
+            modalities=modalities,
             clip_limit=clip_limit,
             tile_grid_size=tile_grid_size,
         )
