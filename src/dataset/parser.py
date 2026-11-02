@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 
+import os
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,19 +55,43 @@ def parse_isles_dataset(
     """
     dataset_path = Path(dataset_dir).resolve()
     if not dataset_path.exists():
-        raise FileNotFoundError(f"ISLES dataset directory not found: {dataset_path}")
+        # Intelligent fallback: Auto-search in Kaggle /kaggle/input or common mounts
+        found = False
+        search_roots = [Path("/kaggle/input"), Path("data/raw")]
+        for s_root in search_roots:
+            if s_root.exists():
+                for root, dirs, _ in os.walk(s_root):
+                    if any(d.startswith("sub-strokecase") for d in dirs):
+                        dataset_path = Path(root)
+                        logger.info("Auto-detected ISLES dataset directory: %s", dataset_path)
+                        found = True
+                        break
+            if found:
+                break
+        if not found:
+            raise FileNotFoundError(f"ISLES dataset directory not found: {dataset_path}")
+
+    # Check if subject folders are nested inside
+    subject_dirs = sorted(
+        [d for d in dataset_path.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
+    )
+    if not subject_dirs:
+        for child in dataset_path.iterdir():
+            if child.is_dir():
+                sub_candidates = [d for d in child.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
+                if sub_candidates:
+                    dataset_path = child
+                    subject_dirs = sorted(sub_candidates)
+                    logger.info("Found subject directories in nested folder: %s", dataset_path)
+                    break
 
     if (dataset_path / "derivatives").exists():
         derivatives_dir = dataset_path / "derivatives"
     elif (dataset_path.parent / "derivatives").exists():
         derivatives_dir = dataset_path.parent / "derivatives"
     else:
-        derivatives_dir = dataset_path / "derivatives"
-
-    # Find all subject directories
-    subject_dirs = sorted(
-        [d for d in dataset_path.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
-    )
+        deriv_candidates = list(dataset_path.glob("**/derivatives")) or list(dataset_path.parent.glob("**/derivatives"))
+        derivatives_dir = deriv_candidates[0] if deriv_candidates else dataset_path / "derivatives"
 
     valid_cases: List[Dict[str, str]] = []
     skipped_count = 0
