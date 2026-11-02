@@ -15,10 +15,13 @@ Metrics computed:
 import argparse
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +51,7 @@ def parse_args():
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="data/raw/ISLES-2022",
+        default="ISLES-2022/ISLES-2022" if Path("ISLES-2022/ISLES-2022").exists() else "data/raw/ISLES-2022",
         help="Path to ISLES-2022 dataset root.",
     )
     parser.add_argument(
@@ -60,13 +63,13 @@ def parse_args():
     parser.add_argument(
         "--swin-ckpt",
         type=str,
-        default="experiments/runs/20.10/swin_unetr_fold0_20261019_131531/best_metric_model.pth",
+        default="experiments/runs/swin_unetr_fold0_20261019_131531/best_metric_model.pth",
         help="Path to Swin UNETR checkpoint.",
     )
     parser.add_argument(
         "--segresnet-ckpt",
         type=str,
-        default="experiments/runs/20.10/segresnet_fold0_20261019_144641/best_metric_model.pth",
+        default="experiments/runs/segresnet_fold0_20261019_144641/best_metric_model.pth",
         help="Path to SegResNet checkpoint.",
     )
     parser.add_argument(
@@ -81,6 +84,12 @@ def parse_args():
         type=float,
         default=0.25,
         help="Sliding window overlap ratio [0.1 - 0.5].",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of DataLoader workers (0 recommended on Windows).",
     )
     parser.add_argument(
         "--output-md",
@@ -179,7 +188,7 @@ def main():
         n_splits=5,
         batch_size=1,
         patch_size=roi_size,
-        num_workers=2,
+        num_workers=args.num_workers,
         use_cache=False,
         modalities=["dwi", "adc"],
         in_channels=2,
@@ -362,10 +371,13 @@ def main():
     out_path.write_text(md_content, encoding="utf-8")
     logger.info("Report saved successfully to: %s", out_path)
 
-    print("\n" + "=" * 80)
-    print("KẾT QUẢ ĐÁNH GIÁ (BẢNG MARKDOWN COPY NỘP THẦY):")
-    print("=" * 80)
-    print(md_content)
+    try:
+        print("\n" + "=" * 80)
+        print("BENCHMARK SUBGROUPS RESULT:")
+        print("=" * 80)
+        print(md_content)
+    except UnicodeEncodeError:
+        print(f"Report written to {out_path} (console encoding does not support full UTF-8 characters).")
 
 
 if __name__ == "__main__":
