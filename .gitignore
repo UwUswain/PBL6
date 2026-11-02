@@ -46,3 +46,8 @@ experiments/runs/
 !experiments/results/
 !experiments/results/*.md
 
+
+# Local-only notes and reports
+dat1.md
+dat2.md
+experiments/baocao_so_sanh_4runs.md

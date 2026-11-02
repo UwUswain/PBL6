@@ -68,15 +68,22 @@ def build_kfold_dataloaders(
     # 3. Instantiate transform pipelines from Task 2
     num_samples = kwargs.get("num_samples_per_volume", 2)
     use_edwi = kwargs.get("use_edwi", False)
+    in_channels = kwargs.get("in_channels", None)
+    modalities = kwargs.get("modalities", None)
+    if modalities is None and in_channels == 2:
+        modalities = ["dwi", "adc"]
+
     train_transforms = get_train_transforms(
         patch_size=patch_size,
         target_spacing=target_spacing,
         num_samples=num_samples,
         use_edwi=use_edwi,
+        modalities=modalities,
     )
     val_transforms = get_val_transforms(
         target_spacing=target_spacing,
         use_edwi=use_edwi,
+        modalities=modalities,
     )
 
     # 4. Construct Datasets
