@@ -26,6 +26,21 @@ class ISLESCase:
         return asdict(self)
 
 
+def _find_file(folder: Optional[Path], *patterns: str) -> Optional[Path]:
+    """Finds a file matching any pattern in a folder, checking direct path and rglob."""
+    if folder is None or not folder.exists():
+        return None
+    for p in patterns:
+        target = folder / p
+        if target.is_file():
+            return target
+    for p in patterns:
+        matches = [m for m in folder.rglob(p) if m.is_file()]
+        if matches:
+            return matches[0]
+    return None
+
+
 def parse_isles_dataset(
     dataset_dir: Union[str, Path],
     require_mask: bool = True,
@@ -54,37 +69,38 @@ def parse_isles_dataset(
         List of dictionaries with keys: 'case_id', 'dwi', 'adc', 'flair', 'mask'.
     """
     dataset_path = Path(dataset_dir).resolve()
-    if not dataset_path.exists():
-        # Intelligent fallback: Auto-search in Kaggle /kaggle/input or common mounts
-        found = False
-        search_roots = [Path("/kaggle/input"), Path("data/raw")]
+
+    # 1. Search for directory containing sub-strokecase folders
+    subject_dirs: List[Path] = []
+    if dataset_path.exists():
+        subject_dirs = sorted(
+            [d for d in dataset_path.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
+        )
+
+    # 2. If not found directly, walk recursively down dataset_path or common roots (e.g. /kaggle/input)
+    if not subject_dirs:
+        search_roots = [dataset_path] if dataset_path.exists() else []
+        search_roots.extend([Path("/kaggle/input"), Path("data/raw")])
         for s_root in search_roots:
             if s_root.exists():
                 for root, dirs, _ in os.walk(s_root):
-                    if any(d.startswith("sub-strokecase") for d in dirs):
+                    candidates = [d for d in dirs if d.startswith("sub-strokecase")]
+                    if candidates:
                         dataset_path = Path(root)
-                        logger.info("Auto-detected ISLES dataset directory: %s", dataset_path)
-                        found = True
+                        subject_dirs = sorted([dataset_path / d for d in candidates])
+                        logger.info(
+                            "Auto-detected ISLES dataset directory: %s (%d cases)",
+                            dataset_path,
+                            len(subject_dirs),
+                        )
                         break
-            if found:
+            if subject_dirs:
                 break
-        if not found:
-            raise FileNotFoundError(f"ISLES dataset directory not found: {dataset_path}")
 
-    # Check if subject folders are nested inside
-    subject_dirs = sorted(
-        [d for d in dataset_path.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
-    )
     if not subject_dirs:
-        for child in dataset_path.iterdir():
-            if child.is_dir():
-                sub_candidates = [d for d in child.iterdir() if d.is_dir() and d.name.startswith("sub-strokecase")]
-                if sub_candidates:
-                    dataset_path = child
-                    subject_dirs = sorted(sub_candidates)
-                    logger.info("Found subject directories in nested folder: %s", dataset_path)
-                    break
+        raise FileNotFoundError(f"ISLES dataset directory with subject cases not found starting from {dataset_dir}")
 
+    # 3. Locate derivatives directory (masks)
     if (dataset_path / "derivatives").exists():
         derivatives_dir = dataset_path / "derivatives"
     elif (dataset_path.parent / "derivatives").exists():
@@ -92,6 +108,8 @@ def parse_isles_dataset(
     else:
         deriv_candidates = list(dataset_path.glob("**/derivatives")) or list(dataset_path.parent.glob("**/derivatives"))
         derivatives_dir = deriv_candidates[0] if deriv_candidates else dataset_path / "derivatives"
+
+    logger.info("Using dataset_path: %s | derivatives_dir: %s", dataset_path, derivatives_dir)
 
     valid_cases: List[Dict[str, str]] = []
     skipped_count = 0
@@ -101,37 +119,66 @@ def parse_isles_dataset(
 
         # Locate session folder (usually ses-0001)
         ses_dirs = [d for d in sub_dir.iterdir() if d.is_dir() and d.name.startswith("ses-")]
-        if not ses_dirs:
-            logger.warning("No session folder found for %s, skipping.", case_id)
+        ses_dir = ses_dirs[0] if ses_dirs else sub_dir
+        ses_name = ses_dir.name if ses_dirs else "ses-0001"
+
+        # Locate DWI and ADC
+        dwi_dir = ses_dir / "dwi" if (ses_dir / "dwi").exists() else ses_dir
+        dwi_path = _find_file(
+            dwi_dir,
+            f"{case_id}_{ses_name}_dwi.nii.gz",
+            f"{case_id}_{ses_name}_dwi.nii",
+            "*dwi.nii.gz",
+            "*dwi.nii",
+            "*DWI.nii*",
+        )
+        adc_path = _find_file(
+            dwi_dir,
+            f"{case_id}_{ses_name}_adc.nii.gz",
+            f"{case_id}_{ses_name}_adc.nii",
+            "*adc.nii.gz",
+            "*adc.nii",
+            "*ADC.nii*",
+        )
+
+        if not dwi_path or not adc_path:
+            logger.warning("Case %s missing DWI or ADC, skipping.", case_id)
             skipped_count += 1
             continue
-        ses_dir = ses_dirs[0]
-        ses_name = ses_dir.name
 
-        # Locate modalities
-        dwi_path = ses_dir / "dwi" / f"{case_id}_{ses_name}_dwi.nii.gz"
-        adc_path = ses_dir / "dwi" / f"{case_id}_{ses_name}_adc.nii.gz"
-        flair_path = ses_dir / "anat" / f"{case_id}_{ses_name}_FLAIR.nii.gz"
-
-        # Check raw image modalities existence
-        missing_images = [
-            name
-            for name, path in [("DWI", dwi_path), ("ADC", adc_path), ("FLAIR", flair_path)]
-            if not path.exists()
-        ]
-        if missing_images:
-            logger.warning(
-                "Case %s missing modalities: %s, skipping.", case_id, ", ".join(missing_images)
-            )
-            skipped_count += 1
-            continue
+        # Locate FLAIR (optional fallback to dwi_path if FLAIR is missing)
+        anat_dir = ses_dir / "anat" if (ses_dir / "anat").exists() else ses_dir
+        flair_path = _find_file(
+            anat_dir,
+            f"{case_id}_{ses_name}_FLAIR.nii.gz",
+            f"{case_id}_{ses_name}_flair.nii.gz",
+            f"{case_id}_{ses_name}_FLAIR.nii",
+            f"{case_id}_{ses_name}_flair.nii",
+            "*FLAIR.nii*",
+            "*flair.nii*",
+        )
+        if not flair_path:
+            flair_path = dwi_path
 
         # Locate ground truth mask
-        mask_path = (
-            derivatives_dir / case_id / ses_name / f"{case_id}_{ses_name}_msk.nii.gz"
+        mask_path = _find_file(
+            derivatives_dir / case_id / ses_name,
+            f"{case_id}_{ses_name}_msk.nii.gz",
+            f"{case_id}_{ses_name}_msk.nii",
+            "*msk.nii*",
+            "*mask.nii*",
         )
-        if require_mask and not mask_path.exists():
-            logger.warning("Case %s missing ground truth mask at %s, skipping.", case_id, mask_path)
+        if not mask_path:
+            mask_path = _find_file(
+                derivatives_dir / case_id,
+                f"{case_id}_{ses_name}_msk.nii.gz",
+                f"{case_id}_{ses_name}_msk.nii",
+                "*msk.nii*",
+                "*mask.nii*",
+            )
+
+        if require_mask and not mask_path:
+            logger.warning("Case %s missing ground truth mask in %s, skipping.", case_id, derivatives_dir)
             skipped_count += 1
             continue
 
@@ -140,7 +187,7 @@ def parse_isles_dataset(
             dwi=str(dwi_path),
             adc=str(adc_path),
             flair=str(flair_path),
-            mask=str(mask_path) if mask_path.exists() else "",
+            mask=str(mask_path) if mask_path else "",
         )
         valid_cases.append(case_obj.to_dict())
 
