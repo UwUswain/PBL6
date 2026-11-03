@@ -174,6 +174,20 @@ def compute_subgroup_metrics(df: pd.DataFrame) -> Dict[str, Dict[str, Union[int,
     return subgroup_summary
 
 
+def _df_to_markdown_simple(df: pd.DataFrame) -> str:
+    """Renders a pandas DataFrame as a GitHub-flavored markdown table without external dependencies."""
+    if df.empty:
+        return ""
+    headers = list(df.columns)
+    header_line = "| " + " | ".join(headers) + " |"
+    sep_line = "| " + " | ".join([":---:"] * len(headers)) + " |"
+    rows = []
+    for _, r in df.iterrows():
+        vals = [f"{v:.4f}" if isinstance(v, float) else str(v) for v in r]
+        rows.append("| " + " | ".join(vals) + " |")
+    return "\n".join([header_line, sep_line] + rows)
+
+
 def evaluate_cohort(
     predictions_and_targets: List[Tuple[str, np.ndarray, np.ndarray, Sequence[float]]],
     output_dir: Path,
@@ -255,10 +269,10 @@ def evaluate_cohort(
 
 ## 3. Case-by-case Distribution
 - Top 5 Best Cases (by DSC):
-{df_cases.nlargest(5, 'dsc')[['case_id', 'dsc', 'avd_ml', 'lcd', 'lesion_f1']].to_markdown(index=False)}
+{_df_to_markdown_simple(df_cases.nlargest(5, 'dsc')[['case_id', 'dsc', 'avd_ml', 'lcd', 'lesion_f1']])}
 
 - Top 5 Most Challenging Cases (by DSC):
-{df_cases.nsmallest(5, 'dsc')[['case_id', 'dsc', 'avd_ml', 'lcd', 'lesion_f1']].to_markdown(index=False)}
+{_df_to_markdown_simple(df_cases.nsmallest(5, 'dsc')[['case_id', 'dsc', 'avd_ml', 'lcd', 'lesion_f1']])}
 """
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(report_content)
