@@ -50,8 +50,8 @@ logging.basicConfig(
 logger = logging.getLogger("eval_engine")
 
 DEFAULT_MODEL_CONFIGS: Dict[str, str] = {
-    "dual_segresnet": "configs/dual_segresnet_2ch_30ep.yaml",
-    "dual_encoder_segresnet": "configs/dual_segresnet_2ch_30ep.yaml",
+    "dual_segresnet": "configs/kaggle_gpu.yaml",
+    "dual_encoder_segresnet": "configs/kaggle_gpu.yaml",
     "segresnet": "configs/train_30ep.yaml",
     "swin_unetr": "configs/swin_unetr_30ep.yaml",
     "mednext": "configs/mednext_30ep.yaml",

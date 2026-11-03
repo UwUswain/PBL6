@@ -1,15 +1,15 @@
-# Kaggle GPU (P100 / T4 - 16GB VRAM & 30GB RAM) Configuration
-# Optimized for ultra-fast training with full RAM caching
+# Kaggle GPU (T4 x2 - 16GB VRAM & 30GB RAM) Configuration
+# Optimized for ultra-fast training with full RAM caching and deep 3D patch context
 
 experiment:
   model_name: "dual_segresnet"
   in_channels: 2
-  max_epochs: 30
+  max_epochs: 50
   learning_rate: 0.001
 
 data:
   modalities: ["dwi", "adc"]
-  roi_size: [96, 96, 32]
+  roi_size: [96, 96, 64]
   batch_size: 2
   num_workers: 4
   use_cache: true
