@@ -114,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         help="Run a minimal smoke test (2 train batches, 1 val case) to verify pipeline.",
     )
     parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Override number of worker processes for DataLoader (default: use config value).",
+    )
+    parser.add_argument(
         "--sw-overlap",
         type=float,
         default=0.25,
@@ -146,7 +152,21 @@ def train_epoch(
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             outputs = model(inputs)
-            loss = loss_fn(outputs, labels)
+            if isinstance(outputs, (tuple, list)):
+                main_out, aux1, aux2 = outputs
+                main_loss = loss_fn(main_out, labels)
+                target_aux1 = torch.nn.functional.interpolate(
+                    labels, size=aux1.shape[2:], mode='nearest'
+                )
+                target_aux2 = torch.nn.functional.interpolate(
+                    labels, size=aux2.shape[2:], mode='nearest'
+                )
+                aux1_loss = loss_fn(aux1, target_aux1)
+                aux2_loss = loss_fn(aux2, target_aux2)
+                # Multi-scale deep supervision formulation (Paper 32 Eq. 15)
+                loss = main_loss + 0.5 * aux1_loss + 0.25 * aux2_loss
+            else:
+                loss = loss_fn(outputs, labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -263,7 +283,11 @@ def main() -> None:
     # - num_workers: Số tiến trình CPU đọc và tiền xử lý dữ liệu ngầm
     roi_size = tuple(cfg["data"]["roi_size"])
     batch_size = int(cfg["data"]["batch_size"])
-    num_workers = int(cfg["data"]["num_workers"])
+    num_workers = (
+        args.num_workers
+        if args.num_workers is not None
+        else int(cfg["data"]["num_workers"])
+    )
 
     # 3. Logic CacheDataset: Dựa vào cờ cfg['data']['use_cache'], quyết định xem sẽ
     # bọc dữ liệu bằng monai.data.CacheDataset (nếu True) hay monai.data.Dataset thông thường (nếu False).

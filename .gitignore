@@ -46,3 +46,5 @@ experiments/runs/
 !experiments/results/
 !experiments/results/*.md
 
+experiments/Kaggle/
+experiments/results/*.csv

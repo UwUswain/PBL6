@@ -1,34 +1,100 @@
-"""3D Dual-Encoder SegResNet for Multimodal Ischemic Stroke Lesion Segmentation.
+"""3D Dual-Encoder SegResNet with Cross-Modality Attention Fusion & Deep Supervision.
 
-Inspired by the multimodal feature disentanglement principle from:
-Usman et al. (Paper 5) - "Dual-Encoder Transformer-Based Multimodal Learning
-for Ischemic Stroke Lesion Segmentation Using Diffusion MRI".
-
-Extends the single-encoder SegResNet baseline into a dual-branch 3D volumetric
-architecture that independently models:
-1. DWI stream: Captures restricted water diffusion hyperintensity.
-2. ADC stream: Captures quantitative apparent diffusion coefficient hypointensity.
-
-Modality-specific features are hierarchically fused across all resolution scales
-via 1x1x1 convolutional bottleneck projections with residual skip connections.
+Architectural Innovations:
+1. Multimodal Feature Disentanglement (Paper 5 - Usman et al.):
+   - Independent 3D encoders for DWI (restricted diffusion hyperintensity)
+     and ADC (quantitative diffusion coefficient hypointensity).
+2. Concurrent Spatial & Channel Squeeze-and-Excitation (scSE Fusion - Roy et al.):
+   - Replaces naive 1x1 conv with concurrent spatial and channel attention
+     to adaptively calibrate lesion boundaries and suppress artifact features.
+3. Multi-Scale Deep Supervision (Paper 32 - Factorizer, Eq. 15):
+   - Auxiliary segmentation heads at intermediate decoder resolutions (1/2, 1/4)
+     to enforce strong gradient flow across deep volumetric pathways.
 """
 
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 from monai.networks.nets import SegResNet
 
 
+class ChannelSpatialSELayer3D(nn.Module):
+    """3D Concurrent Spatial and Channel Squeeze & Excitation (scSE) block.
+
+    Reference:
+        Roy et al., 'Concurrent Spatial and Channel 'Squeeze & Excitation'
+        in Fully Convolutional Networks', IEEE TMI 2018.
+    """
+
+    def __init__(self, channels: int, reduction: int = 4) -> None:
+        super().__init__()
+        reduced_ch = max(1, channels // reduction)
+
+        # Channel Squeeze-and-Excitation (cSE)
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.cse = nn.Sequential(
+            nn.Conv3d(channels, reduced_ch, kernel_size=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(reduced_ch, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+        # Spatial Squeeze-and-Excitation (sSE)
+        self.sse = nn.Sequential(
+            nn.Conv3d(channels, 1, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Applies concurrent cSE and sSE calibration to the input volume."""
+        # Channel recalibration
+        cse_weight = self.cse(self.avg_pool(x))
+        x_cse = x * cse_weight
+
+        # Spatial recalibration
+        sse_weight = self.sse(x)
+        x_sse = x * sse_weight
+
+        # Concurrent combination
+        return x_cse + x_sse
+
+
+class CrossModalityAttentionFusion(nn.Module):
+    """Hierarchical Cross-Modality Attention Fusion block for DWI and ADC.
+
+    Fuses complementary modalities via:
+    1. Channel-preserving 1x1x1 bottleneck projection with Instance Normalization.
+    2. Concurrent 3D scSE attention recalibration.
+    """
+
+    def __init__(self, channels: int, reduction: int = 4) -> None:
+        super().__init__()
+        self.conv_proj = nn.Sequential(
+            nn.Conv3d(channels * 2, channels, kernel_size=1, bias=False),
+            nn.InstanceNorm3d(channels),
+            nn.LeakyReLU(negative_slope=0.01, inplace=True),
+        )
+        self.scse = ChannelSpatialSELayer3D(channels, reduction=reduction)
+
+    def forward(self, dwi_feat: torch.Tensor, adc_feat: torch.Tensor) -> torch.Tensor:
+        """Fuses DWI and ADC features with concurrent attention recalibration."""
+        concat_feat = torch.cat([dwi_feat, adc_feat], dim=1)
+        proj_feat = self.conv_proj(concat_feat)
+        attn_feat = self.scse(proj_feat)
+        return attn_feat
+
+
 class DualEncoderSegResNet(nn.Module):
-    """3D Dual-Branch SegResNet for independent DWI and ADC feature extraction.
+    """3D Dual-Branch SegResNet with scSE Fusion and Deep Supervision.
 
     Args:
         in_channels: Total input channels (must be 2: channel 0 = DWI, channel 1 = ADC).
-        out_channels: Number of segmentation output channels (default: 1 for binary stroke mask).
+        out_channels: Number of output channels (default: 1 for binary stroke mask).
         init_filters: Number of base filters (default: 16).
-        blocks_down: Number of convolutional blocks per downsampling level (default: (1, 2, 2, 4)).
-        blocks_up: Number of convolutional blocks per upsampling level (default: (1, 1, 1)).
+        blocks_down: Convolutional blocks per downsampling level (default: (1, 2, 2, 4)).
+        blocks_up: Convolutional blocks per upsampling level (default: (1, 1, 1)).
         dropout_prob: Dropout probability for regularization (default: 0.2).
+        deep_supervision: Whether to output intermediate auxiliary logits during training (default: True).
     """
 
     def __init__(
@@ -39,16 +105,20 @@ class DualEncoderSegResNet(nn.Module):
         blocks_down: Sequence[int] = (1, 2, 2, 4),
         blocks_up: Sequence[int] = (1, 1, 1),
         dropout_prob: float = 0.2,
+        deep_supervision: bool = True,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__()
         if in_channels != 2:
-            raise ValueError(f"DualEncoderSegResNet requires exactly 2 input channels [DWI, ADC], got {in_channels}")
+            raise ValueError(
+                f"DualEncoderSegResNet requires exactly 2 input channels [DWI, ADC], got {in_channels}"
+            )
 
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.deep_supervision = deep_supervision
 
-        # Branch 1: Dedicated 3D Encoder & Decoder backbone (DWI stream)
+        # Branch 1: Dedicated 3D DWI backbone (Encoder + Decoder structure)
         self.seg_dwi = SegResNet(
             spatial_dims=3,
             in_channels=1,
@@ -60,7 +130,7 @@ class DualEncoderSegResNet(nn.Module):
             **kwargs,
         )
 
-        # Branch 2: Dedicated 3D Encoder (ADC stream)
+        # Branch 2: Dedicated 3D ADC encoder backbone
         self.seg_adc = SegResNet(
             spatial_dims=3,
             in_channels=1,
@@ -72,56 +142,66 @@ class DualEncoderSegResNet(nn.Module):
             **kwargs,
         )
 
-        # Multimodal fusion projections at each downsampling resolution scale
-        # Level i has channels = init_filters * (2 ** i)
-        self.fusion_convs = nn.ModuleList()
+        # Multi-scale cross-modality attention fusion modules
+        self.fusion_modules = nn.ModuleList()
         for i in range(len(blocks_down)):
             ch = init_filters * (2 ** i)
-            # Concatenates DWI (ch) + ADC (ch) -> 1x1x1 Conv -> ch
-            self.fusion_convs.append(
-                nn.Sequential(
-                    nn.Conv3d(ch * 2, ch, kernel_size=1, bias=False),
-                    nn.InstanceNorm3d(ch),
-                    nn.ReLU(inplace=True),
-                )
-            )
+            self.fusion_modules.append(CrossModalityAttentionFusion(ch))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through dual encoders, multi-scale fusion, and shared decoder.
+        # Deep supervision auxiliary heads
+        if self.deep_supervision:
+            # Stage 0: 1/4 resolution (channels = init_filters * 4)
+            ch_stage0 = init_filters * 4
+            self.aux_head_stage0 = nn.Conv3d(ch_stage0, out_channels, kernel_size=1)
+
+            # Stage 1: 1/2 resolution (channels = init_filters * 2)
+            ch_stage1 = init_filters * 2
+            self.aux_head_stage1 = nn.Conv3d(ch_stage1, out_channels, kernel_size=1)
+        else:
+            self.aux_head_stage0 = None
+            self.aux_head_stage1 = None
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Forward pass through dual encoders, scSE fusion, and shared decoder.
 
         Args:
-            x: Input tensor of shape [B, 2, D, H, W] where:
-               x[:, 0:1, ...] is DWI
-               x[:, 1:2, ...] is ADC
+            x: Input tensor [B, 2, D, H, W] where channel 0 is DWI and channel 1 is ADC.
 
         Returns:
-            Output logits tensor of shape [B, 1, D, H, W]
+            In training mode (if deep_supervision=True):
+                Tuple of (main_logits, aux_stage1_logits, aux_stage0_logits).
+            In eval/inference mode:
+                Main logits tensor [B, 1, D, H, W].
         """
         x_dwi = x[:, 0:1, ...]
         x_adc = x[:, 1:2, ...]
 
-        # 1. Initial 3D convolutions for each modality
+        # 1. Modality-specific initial 3D convolutions
         x_d = self.seg_dwi.convInit(x_dwi)
         x_a = self.seg_adc.convInit(x_adc)
 
-        # 2. Hierarchical multi-scale dual encoding with fusion
+        # 2. Hierarchical dual encoding with concurrent scSE fusion
         down_features = []
-        for layer_d, layer_a, fuse in zip(
+        for layer_d, layer_a, fuse_mod in zip(
             self.seg_dwi.down_layers,
             self.seg_adc.down_layers,
-            self.fusion_convs,
+            self.fusion_modules,
         ):
             x_d = layer_d(x_d)
             x_a = layer_a(x_a)
 
-            # Fuse complementary DWI and ADC representations
-            fused = fuse(torch.cat([x_d, x_a], dim=1))
-            # Residual injection into primary feature stream
+            # Fuse and add residual skip to primary representation
+            fused = fuse_mod(x_d, x_a)
             x_d = x_d + fused
             down_features.append(x_d)
 
-        # 3. 3D Decoder with fused skip connections
+        # 3. 3D Decoder with multi-resolution intermediate taps
         x_dec = down_features[-1]
+        aux_stage0 = None
+        aux_stage1 = None
+
         for i, (up_sample, up_layer) in enumerate(
             zip(self.seg_dwi.up_samples, self.seg_dwi.up_layers)
         ):
@@ -130,6 +210,17 @@ class DualEncoderSegResNet(nn.Module):
             x_dec = x_dec + skip
             x_dec = up_layer(x_dec)
 
-        # 4. Final segmentation head
+            # Collect auxiliary logits for deep supervision
+            if self.deep_supervision and self.training:
+                if i == 0:  # 1/4 resolution scale
+                    aux_stage0 = self.aux_head_stage0(x_dec)
+                elif i == 1:  # 1/2 resolution scale
+                    aux_stage1 = self.aux_head_stage1(x_dec)
+
+        # 4. Final full-resolution segmentation head
         out = self.seg_dwi.conv_final(x_dec)
+
+        if self.deep_supervision and self.training:
+            return out, aux_stage1, aux_stage0
+
         return out
