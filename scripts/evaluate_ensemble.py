@@ -83,7 +83,7 @@ def find_checkpoints_for_model(model_name: str, root_dir: Path) -> List[Path]:
             continue
         for fold_idx in range(5):
             fold_pattern = f"*{model_name_norm}*fold{fold_idx}*"
-            matches = list(search_dir.glob(fold_pattern))
+            matches = list(search_dir.rglob(fold_pattern))
             for match in matches:
                 ckpt_path = match / "best_metric_model.pth"
                 if ckpt_path.is_file() and ckpt_path not in checkpoints:
