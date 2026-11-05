@@ -169,8 +169,14 @@ def train_epoch(
                 loss = loss_fn(outputs, labels)
 
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if use_amp:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         epoch_loss += loss.item()
         step_count += 1
@@ -380,12 +386,19 @@ def main() -> None:
     # =========================================================================
     # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS), OPTIMIZER VÀ SCHEDULER
     # =========================================================================
-    loss_fn = get_loss_function(include_background=False, sigmoid=True, squared_pred=True)
+    loss_type = str(cfg.get("experiment", {}).get("loss", "dice_ce"))
+    loss_fn = get_loss_function(
+        loss_type=loss_type,
+        include_background=False,
+        sigmoid=True,
+        squared_pred=False,
+    )
 
+    weight_decay = float(cfg.get("experiment", {}).get("weight_decay", args.weight_decay))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=learning_rate,
-        weight_decay=args.weight_decay,
+        weight_decay=weight_decay,
     )
     total_epochs = 1 if args.dry_run else max_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
