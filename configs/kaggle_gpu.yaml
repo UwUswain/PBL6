@@ -1,10 +1,10 @@
 # Kaggle GPU (T4 x2 - 16GB VRAM & 30GB RAM) Configuration
-# Fully aligned with Paper 32 (Factorizer): DiceCELoss, Weight Decay 0.01, Stable LR
+# Fully aligned with Paper 32 (Factorizer): DiceCELoss, Weight Decay 0.01, Stable LR, 100 Epochs
 
 experiment:
   model_name: "dual_segresnet"
   in_channels: 2
-  max_epochs: 50
+  max_epochs: 100
   learning_rate: 0.0002
   weight_decay: 0.01
   loss: "dice_ce"
