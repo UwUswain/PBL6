@@ -1,6 +1,6 @@
 # ISLES-2022 Evaluation Report: dual_segresnet_single_fold0
 
-**Evaluation Date:** 2026-11-04 07:31:13  
+**Evaluation Date:** 2026-11-06 11:01:30  
 **Total Cases Evaluated:** 50  
 
 ---
@@ -9,10 +9,10 @@
 
 | Metric | Mean ± Std | Median | Unit / Target |
 | :--- | :--- | :--- | :--- |
-| **Dice Similarity Coefficient (DSC)** | **0.5866 ± 0.2392** | **0.6336** | Higher is better (Max 1.0) |
-| **Absolute Volume Difference (AVD)** | **13.99 ± 70.67** | **1.09** | mL (Lower is better) |
-| **Lesion Count Difference (LCD)** | **12.42 ± 17.30** | **8.00** | Count (Lower is better) |
-| **Lesion Detection F1 Score** | **0.3147 ± 0.1949** | **0.2857** | Higher is better (Max 1.0) |
+| **Dice Similarity Coefficient (DSC)** | **0.6798 ± 0.2059** | **0.7361** | Higher is better (Max 1.0) |
+| **Absolute Volume Difference (AVD)** | **2.86 ± 6.63** | **0.73** | mL (Lower is better) |
+| **Lesion Count Difference (LCD)** | **7.48 ± 14.19** | **4.00** | Count (Lower is better) |
+| **Lesion Detection F1 Score** | **0.4482 ± 0.2065** | **0.4410** | Higher is better (Max 1.0) |
 
 ---
 
@@ -20,9 +20,9 @@
 
 | Subgroup Category | Case Count | Mean DSC | Mean AVD | Mean LCD | Mean Lesion F1 |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Small (< 5 mL) | 26 | 0.4483 | 21.11 mL | 11.77 | 0.2784 |
-| Medium (5 - 30 mL) | 17 | 0.6887 | 3.07 mL | 17.12 | 0.3368 |
-| Large (> 30 mL) | 7 | 0.8524 | 14.06 mL | 3.43 | 0.3959 |
+| Small (< 5 mL) | 26 | 0.5843 | 0.99 mL | 4.77 | 0.4256 |
+| Medium (5 - 30 mL) | 17 | 0.7449 | 2.37 mL | 12.94 | 0.4589 |
+| Large (> 30 mL) | 7 | 0.8764 | 11.02 mL | 4.29 | 0.5062 |
 
 ---
 
@@ -30,17 +30,17 @@
 - Top 5 Best Cases (by DSC):
 | case_id | dsc | avd_ml | lcd | lesion_f1 |
 | :---: | :---: | :---: | :---: | :---: |
-| single_fold0_case12 | 0.9017 | 2.2140 | 1 | 0.5333 |
-| single_fold0_case04 | 0.8852 | 5.1550 | 0 | 0.5625 |
-| single_fold0_case21 | 0.8758 | 0.2210 | 8 | 0.4286 |
-| single_fold0_case28 | 0.8691 | 8.9620 | 8 | 0.5417 |
-| single_fold0_case44 | 0.8523 | 25.7750 | 6 | 0.4444 |
+| single_fold0_case44 | 0.9183 | 3.8510 | 3 | 0.6667 |
+| single_fold0_case12 | 0.9084 | 8.2920 | 2 | 0.6667 |
+| single_fold0_case04 | 0.9022 | 3.6290 | 1 | 0.6452 |
+| single_fold0_case21 | 0.8922 | 0.4670 | 4 | 0.6000 |
+| single_fold0_case28 | 0.8914 | 3.3870 | 8 | 0.5000 |
 
 - Top 5 Most Challenging Cases (by DSC):
 | case_id | dsc | avd_ml | lcd | lesion_f1 |
 | :---: | :---: | :---: | :---: | :---: |
-| single_fold0_case25 | 0.0004 | 500.7440 | 75 | 0.0000 |
-| single_fold0_case01 | 0.0208 | 22.6480 | 35 | 0.0000 |
-| single_fold0_case48 | 0.1077 | 0.5210 | 4 | 0.0000 |
-| single_fold0_case14 | 0.1359 | 2.7110 | 8 | 0.1429 |
-| single_fold0_case03 | 0.1628 | 6.1460 | 9 | 0.1818 |
+| single_fold0_case25 | 0.0368 | 10.5150 | 8 | 0.2000 |
+| single_fold0_case22 | 0.0983 | 1.7340 | 3 | 0.4000 |
+| single_fold0_case48 | 0.1919 | 0.5190 | 3 | 0.0000 |
+| single_fold0_case01 | 0.3955 | 1.6580 | 4 | 0.1429 |
+| single_fold0_case38 | 0.4077 | 10.3260 | 11 | 0.2105 |
