@@ -1,13 +1,16 @@
-"""3D Dual-Encoder SegResNet with Cross-Modality Attention Fusion & Deep Supervision.
+"""3D Dual-Encoder SegResNet with Bidirectional Cross-Modality Attention Fusion & Deep Supervision (V3).
 
 Architectural Innovations:
 1. Multimodal Feature Disentanglement (Paper 5 - Usman et al.):
    - Independent 3D encoders for DWI (restricted diffusion hyperintensity)
      and ADC (quantitative diffusion coefficient hypointensity).
-2. Concurrent Spatial & Channel Squeeze-and-Excitation (scSE Fusion - Roy et al.):
-   - Replaces naive 1x1 conv with concurrent spatial and channel attention
-     to adaptively calibrate lesion boundaries and suppress artifact features.
-3. Multi-Scale Deep Supervision (Paper 32 - Factorizer, Eq. 15):
+2. Bidirectional Cross-Modality Attention (BiCrossAttention):
+   - Modality-specific reciprocal recalibration via concurrent 3D scSE (Roy et al.).
+   - DWI is guided by ADC (diffusion coefficient hypointensity suppressing T2 shine-through).
+   - ADC is guided by DWI (hyperintensity providing sharp spatial localization).
+3. Parameter-Efficient Backbone:
+   - Unused ADC decoder structures are cleanly pruned to maximize parameter efficiency.
+4. Multi-Scale Deep Supervision (Paper 32 - Factorizer, Eq. 15):
    - Auxiliary segmentation heads at intermediate decoder resolutions (1/2, 1/4)
      to enforce strong gradient flow across deep volumetric pathways.
 """
@@ -47,20 +50,17 @@ class ChannelSpatialSELayer3D(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Applies concurrent cSE and sSE calibration to the input volume."""
-        # Channel recalibration
         cse_weight = self.cse(self.avg_pool(x))
         x_cse = x * cse_weight
 
-        # Spatial recalibration
         sse_weight = self.sse(x)
         x_sse = x * sse_weight
 
-        # Concurrent combination
         return x_cse + x_sse
 
 
 class CrossModalityAttentionFusion(nn.Module):
-    """Hierarchical Cross-Modality Attention Fusion block for DWI and ADC.
+    """Unidirectional Cross-Modality Attention Fusion block for DWI and ADC (V2 compatibility).
 
     Fuses complementary modalities via:
     1. Channel-preserving 1x1x1 bottleneck projection with Instance Normalization.
@@ -77,35 +77,89 @@ class CrossModalityAttentionFusion(nn.Module):
         self.scse = ChannelSpatialSELayer3D(channels, reduction=reduction)
 
     def forward(self, dwi_feat: torch.Tensor, adc_feat: torch.Tensor) -> torch.Tensor:
-        """Fuses DWI and ADC features with concurrent attention recalibration."""
+        """Fuses DWI and ADC features into a single recalibrated feature map."""
         concat_feat = torch.cat([dwi_feat, adc_feat], dim=1)
         proj_feat = self.conv_proj(concat_feat)
         attn_feat = self.scse(proj_feat)
         return attn_feat
 
 
+class BiCrossAttentionFusion3D(nn.Module):
+    """3D Bidirectional Cross-Modality Attention Fusion block for DWI and ADC (V3 Innovation).
+
+    Fuses complementary modalities reciprocally:
+    1. Joint channel-preserving 1x1x1 bottleneck projection with Instance Normalization.
+    2. Concurrent 3D scSE (channel and spatial) attention calibration.
+    3. Bidirectional feature recalibration:
+       - Modality-specific residual projections update both DWI and ADC pathways.
+       - DWI is guided by ADC (diffusion coefficient hypointensity suppressing T2 shine-through).
+       - ADC is guided by DWI (hyperintensity providing sharp spatial localization).
+    """
+
+    def __init__(self, channels: int, reduction: int = 4) -> None:
+        super().__init__()
+        self.conv_proj = nn.Sequential(
+            nn.Conv3d(channels * 2, channels, kernel_size=1, bias=False),
+            nn.InstanceNorm3d(channels),
+            nn.LeakyReLU(negative_slope=0.01, inplace=True),
+        )
+        self.scse = ChannelSpatialSELayer3D(channels, reduction=reduction)
+
+        # Modality-specific projection heads for reciprocal updates
+        self.proj_dwi = nn.Sequential(
+            nn.Conv3d(channels, channels, kernel_size=1, bias=False),
+            nn.InstanceNorm3d(channels),
+        )
+        self.proj_adc = nn.Sequential(
+            nn.Conv3d(channels, channels, kernel_size=1, bias=False),
+            nn.InstanceNorm3d(channels),
+        )
+
+    def forward(
+        self, dwi_feat: torch.Tensor, adc_feat: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Reciprocally fuses DWI and ADC features.
+
+        Args:
+            dwi_feat: DWI feature tensor [B, C, D, H, W].
+            adc_feat: ADC feature tensor [B, C, D, H, W].
+
+        Returns:
+            Tuple of recalibrated (dwi_out, adc_out) tensors, each [B, C, D, H, W].
+        """
+        concat_feat = torch.cat([dwi_feat, adc_feat], dim=1)
+        proj_feat = self.conv_proj(concat_feat)
+        calibrated = self.scse(proj_feat)
+
+        dwi_out = dwi_feat + self.proj_dwi(calibrated)
+        adc_out = adc_feat + self.proj_adc(calibrated)
+        return dwi_out, adc_out
+
+
 class DualEncoderSegResNet(nn.Module):
-    """3D Dual-Branch SegResNet with scSE Fusion and Deep Supervision.
+    """3D Dual-Branch SegResNet with BiCrossAttention and Deep Supervision (V3).
 
     Args:
         in_channels: Total input channels (must be 2: channel 0 = DWI, channel 1 = ADC).
         out_channels: Number of output channels (default: 1 for binary stroke mask).
-        init_filters: Number of base filters (default: 16).
+        init_filters: Number of base filters (default: 32 for SOTA capacity, or 16).
         blocks_down: Convolutional blocks per downsampling level (default: (1, 2, 2, 4)).
         blocks_up: Convolutional blocks per upsampling level (default: (1, 1, 1)).
         dropout_prob: Dropout probability for regularization (default: 0.2).
         deep_supervision: Whether to output intermediate auxiliary logits during training (default: True).
+        fusion_mode: Fusion mode ('bidirectional' for V3 or 'unidirectional' for V2).
     """
 
     def __init__(
         self,
         in_channels: int = 2,
         out_channels: int = 1,
-        init_filters: int = 16,
+        init_filters: int = 32,
         blocks_down: Sequence[int] = (1, 2, 2, 4),
         blocks_up: Sequence[int] = (1, 1, 1),
         dropout_prob: float = 0.2,
         deep_supervision: bool = True,
+        fusion_mode: str = "bidirectional",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -117,6 +171,7 @@ class DualEncoderSegResNet(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.deep_supervision = deep_supervision
+        self.fusion_mode = fusion_mode.lower().strip()
 
         # Branch 1: Dedicated 3D DWI backbone (Encoder + Decoder structure)
         self.seg_dwi = SegResNet(
@@ -142,11 +197,22 @@ class DualEncoderSegResNet(nn.Module):
             **kwargs,
         )
 
+        # Prune unused ADC decoder structures to optimize parameter count and VRAM
+        del self.seg_adc.up_samples
+        del self.seg_adc.up_layers
+        del self.seg_adc.conv_final
+        self.seg_adc.up_samples = nn.ModuleList()
+        self.seg_adc.up_layers = nn.ModuleList()
+        self.seg_adc.conv_final = nn.Identity()
+
         # Multi-scale cross-modality attention fusion modules
         self.fusion_modules = nn.ModuleList()
         for i in range(len(blocks_down)):
             ch = init_filters * (2 ** i)
-            self.fusion_modules.append(CrossModalityAttentionFusion(ch))
+            if self.fusion_mode == "bidirectional":
+                self.fusion_modules.append(BiCrossAttentionFusion3D(ch))
+            else:
+                self.fusion_modules.append(CrossModalityAttentionFusion(ch))
 
         # Deep supervision auxiliary heads
         if self.deep_supervision:
@@ -164,7 +230,7 @@ class DualEncoderSegResNet(nn.Module):
     def forward(
         self, x: torch.Tensor
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Forward pass through dual encoders, scSE fusion, and shared decoder.
+        """Forward pass through dual encoders, BiCrossAttention, and shared decoder.
 
         Args:
             x: Input tensor [B, 2, D, H, W] where channel 0 is DWI and channel 1 is ADC.
@@ -182,7 +248,7 @@ class DualEncoderSegResNet(nn.Module):
         x_d = self.seg_dwi.convInit(x_dwi)
         x_a = self.seg_adc.convInit(x_adc)
 
-        # 2. Hierarchical dual encoding with concurrent scSE fusion
+        # 2. Hierarchical dual encoding with BiCrossAttention fusion
         down_features = []
         for layer_d, layer_a, fuse_mod in zip(
             self.seg_dwi.down_layers,
@@ -192,10 +258,14 @@ class DualEncoderSegResNet(nn.Module):
             x_d = layer_d(x_d)
             x_a = layer_a(x_a)
 
-            # Fuse and add residual skip to primary representation
-            fused = fuse_mod(x_d, x_a)
-            x_d = x_d + fused
-            down_features.append(x_d)
+            if self.fusion_mode == "bidirectional":
+                x_d, x_a = fuse_mod(x_d, x_a)
+                # Symmetrically balanced representation for decoder skip connections
+                down_features.append(0.5 * (x_d + x_a))
+            else:
+                fused = fuse_mod(x_d, x_a)
+                x_d = x_d + fused
+                down_features.append(x_d)
 
         # 3. 3D Decoder with multi-resolution intermediate taps
         x_dec = down_features[-1]
@@ -224,3 +294,4 @@ class DualEncoderSegResNet(nn.Module):
             return out, aux_stage1, aux_stage0
 
         return out
+

@@ -27,6 +27,7 @@ from src.dataset.dataloader import build_kfold_dataloaders
 from src.losses.builder import get_loss_function
 from src.metrics.dice import compute_dice
 from src.models.builder import get_model
+from src.utils.postprocess import remove_small_lesion_islands
 
 logger = logging.getLogger("train_engine")
 
@@ -125,6 +126,18 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="Sliding window overlap ratio for validation inference [0.0 - 0.99].",
     )
+    parser.add_argument(
+        "--postprocess-min-size",
+        type=int,
+        default=0,
+        help="Minimum 3D connected-component voxel size for validation filtering (default: 0 = disabled).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to use ('cuda', 'cpu'). Defaults to cuda if available.",
+    )
     return parser.parse_args()
 
 
@@ -204,6 +217,7 @@ def validate(
     use_amp: bool,
     overlap: float = 0.25,
     max_cases: int = 0,
+    postprocess_min_size: int = 0,
 ) -> Tuple[float, int]:
     """Runs full-volume evaluation using sliding window inference."""
     model.eval()
@@ -238,6 +252,10 @@ def validate(
 
             # Binarize output mask
             val_preds = (torch.sigmoid(val_outputs) > 0.5).float()
+            if postprocess_min_size > 0:
+                val_preds = remove_small_lesion_islands(
+                    val_preds, min_size_voxels=postprocess_min_size
+                )
             dice = compute_dice(val_preds[0, 0], val_labels[0, 0])
             elapsed = time.time() - case_start
 
@@ -300,7 +318,7 @@ def main() -> None:
     # - Khi use_cache = True: Bộ nạp sẽ giữ toàn bộ hoặc một phần (cache_rate) dữ liệu đã tiền xử lý
     #   trực tiếp trên bộ nhớ RAM. Giúp bỏ qua bước I/O từ ổ cứng ở mỗi epoch, tăng tốc độ 5-8 lần.
     # - Khi use_cache = False: Bộ nạp sẽ xử lý on-the-fly trên từng batch, giúp tiết kiệm RAM tối đa.
-    use_cache = bool(cfg["data"].get("use_cache", False))
+    use_cache = bool(cfg["data"].get("use_cache", False)) and (not args.dry_run)
     cache_rate = float(cfg["data"].get("cache_rate", 1.0 if use_cache else 0.5))
     use_edwi = bool(cfg["data"].get("use_edwi", False))
 
@@ -319,7 +337,10 @@ def main() -> None:
     # =========================================================================
     # BƯỚC 2: THIẾT LẬP THIẾT BỊ VÀ THƯ MỤC THỰC NGHIỆM
     # =========================================================================
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and (device.type == "cuda")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -376,25 +397,47 @@ def main() -> None:
     # =========================================================================
     # BƯỚC 4: KHỞI TẠO MÔ HÌNH (MODEL ARCHITECTURE)
     # =========================================================================
-    logger.info("Instantiating %s model (%d channels in, 1 channel out)...", model_name, in_channels)
+    exp_cfg = cfg.get("experiment", {})
+    init_filters = int(exp_cfg.get("init_filters", 32 if "dual_segresnet" in model_name else 16))
+    fusion_mode = str(exp_cfg.get("fusion_mode", "bidirectional"))
+    deep_supervision = bool(exp_cfg.get("deep_supervision", True))
+
+    logger.info(
+        "Instantiating %s (channels: %d, init_filters: %d, fusion: %s, deep_supervision: %s)...",
+        model_name,
+        in_channels,
+        init_filters,
+        fusion_mode,
+        deep_supervision,
+    )
     model = get_model(
         model_name=model_name,
         in_channels=in_channels,
         out_channels=1,
+        init_filters=init_filters,
+        fusion_mode=fusion_mode,
+        deep_supervision=deep_supervision,
     ).to(device)
 
     # =========================================================================
-    # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS), OPTIMIZER VÀ SCHEDULER
+    # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS / DICEFOCALLOSS), OPTIMIZER VÀ SCHEDULER
     # =========================================================================
-    loss_type = str(cfg.get("experiment", {}).get("loss", "dice_ce"))
+    loss_type = str(exp_cfg.get("loss", "dice_ce"))
+    loss_gamma = float(exp_cfg.get("loss_gamma", 2.0))
+    loss_alpha = exp_cfg.get("loss_alpha", None)
+    if loss_alpha is not None:
+        loss_alpha = float(loss_alpha)
+
     loss_fn = get_loss_function(
         loss_type=loss_type,
         include_background=False,
         sigmoid=True,
         squared_pred=False,
+        gamma=loss_gamma,
+        alpha=loss_alpha,
     )
 
-    weight_decay = float(cfg.get("experiment", {}).get("weight_decay", args.weight_decay))
+    weight_decay = float(exp_cfg.get("weight_decay", args.weight_decay))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=learning_rate,
@@ -403,6 +446,15 @@ def main() -> None:
     total_epochs = 1 if args.dry_run else max_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    postprocess_min_size = args.postprocess_min_size
+    if postprocess_min_size == 0:
+        postprocess_min_size = int(exp_cfg.get("postprocess_min_size", 0))
+    if postprocess_min_size > 0:
+        logger.info(
+            "3D Connected-Component Postprocessing enabled (min_size: %d voxels)",
+            postprocess_min_size,
+        )
 
     # =========================================================================
     # BƯỚC 6: XỬ LÝ CHẾ ĐỘ THỬ NGHIỆM NHANH (DRY-RUN SMOKE TEST)
@@ -430,6 +482,7 @@ def main() -> None:
             use_amp=use_amp,
             overlap=args.sw_overlap,
             max_cases=1,
+            postprocess_min_size=postprocess_min_size,
         )
         logger.info("[DRY-RUN] Validation completed. Case Dice Score: %.4f", val_dice)
 
@@ -495,6 +548,7 @@ def main() -> None:
                 device=device,
                 use_amp=use_amp,
                 overlap=args.sw_overlap,
+                postprocess_min_size=postprocess_min_size,
             )
             val_duration = time.time() - val_start
 

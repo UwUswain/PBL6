@@ -1,13 +1,22 @@
 # Kaggle GPU (T4 x2 - 16GB VRAM & 30GB RAM) Configuration
-# Fully aligned with Paper 32 (Factorizer): DiceCELoss, Weight Decay 0.01, Stable LR, 100 Epochs
+# Dual-Encoder SegResNet V3:
+# 1. Capacity Scaling: init_filters=32 (channels: 32 -> 64 -> 128 -> 256)
+# 2. Reciprocal Interaction: Bidirectional Cross-Modality Attention (BiCrossAttention)
+# 3. Loss: DiceFocalLoss (gamma=2.0) with Multi-Scale Deep Supervision
+# 4. Post-processing: 3D Connected-Component Filtering (min_size: 15 voxels)
 
 experiment:
   model_name: "dual_segresnet"
   in_channels: 2
+  init_filters: 32
+  fusion_mode: "bidirectional"
+  deep_supervision: true
   max_epochs: 100
   learning_rate: 0.0002
   weight_decay: 0.01
-  loss: "dice_ce"
+  loss: "dice_focal"
+  loss_gamma: 2.0
+  postprocess_min_size: 15
 
 data:
   modalities: ["dwi", "adc"]
