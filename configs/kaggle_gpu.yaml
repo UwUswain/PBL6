@@ -16,7 +16,7 @@ experiment:
   weight_decay: 0.01
   loss: "dice_focal"
   loss_gamma: 2.0
-  val_interval: 5
+  val_interval: 1
   postprocess_min_size: 15
 
 data:
