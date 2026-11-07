@@ -27,3 +27,10 @@
 - **Large Artifacts Isolation:** Tuyệt đối KHÔNG can thiệp `.gitignore` để commit file trọng số (`*.pth`, `*.pt`, `*.onnx`). Toàn bộ checkpoints phải nằm cục bộ trong `experiments/runs/` (đã được cấu hình ẩn khỏi Git).
 - **Results Sync:** Chỉ commit các file báo cáo tổng hợp dạng Markdown (`.md`) nằm trong thư mục `experiments/results/`.
 
+## 5. KAGGLE CLOUD TRAINING RULES & EXECUTION TIME BUDGET
+- **Hard Timeout Limit:** Kaggle background sessions (`Save & Run All`) có trần cứng tuyệt đối là **12.0 giờ (43,200s)**.
+- **Model V3 Computation Cost:** Với kiến trúc mở rộng `init_filters: 32` (36.8M parameters), khối lượng tính toán Conv3D tăng gấp đôi.
+  - BẮT BUỘC dùng `val_interval: 5` (validate mỗi 5 epoch) để cắt giảm 80% thời gian validation thừa.
+  - BẮT BUỘC chia nhỏ lượt chạy nếu cần: Session 1 (Fold 0, 1: ~3.5h), Session 2 (Fold 2, 3: ~3.5h), Session 3 (Fold 4: ~1.8h).
+  - BẮT BUỘC nén zip tăng dần (`zip -u`) ngay sau MỖI FOLD để lưu trữ lũy kế, không bao giờ chờ hết cả 5 folds mới nén.
+

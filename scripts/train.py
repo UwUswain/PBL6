@@ -447,6 +447,10 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    val_interval = args.val_interval
+    if val_interval == 1 and "val_interval" in exp_cfg:
+        val_interval = int(exp_cfg["val_interval"])
+
     postprocess_min_size = args.postprocess_min_size
     if postprocess_min_size == 0:
         postprocess_min_size = int(exp_cfg.get("postprocess_min_size", 0))
@@ -539,7 +543,7 @@ def main() -> None:
         )
 
         # Đánh giá Validation định kỳ
-        if epoch % args.val_interval == 0 or epoch == total_epochs:
+        if epoch % val_interval == 0 or epoch == total_epochs:
             val_start = time.time()
             val_dice, num_cases = validate(
                 model=model,
@@ -578,6 +582,11 @@ def main() -> None:
                     best_dice,
                     best_model_path,
                 )
+
+        # Ensure logs are flushed to disk immediately on every epoch
+        for handler in logger.handlers:
+            handler.flush()
+        sys.stdout.flush()
 
         # Lưu checkpoint gần nhất ở mỗi epoch (Last Checkpoint)
         latest_path = run_dir / "last_checkpoint.pth"
