@@ -6,6 +6,7 @@ import monai.data as md
 import monai.transforms as mt
 import numpy as np
 import torch
+from scipy.ndimage import label
 
 
 def _binarize_mask(m):
@@ -88,6 +89,83 @@ class GenerateEnhancedDWId(mt.MapTransform):
         return d
 
 
+class RandCropByConnectedComponentsd(mt.MapTransform):
+    """3D patch cropping centered uniformly across distinct connected stroke lesions.
+
+    Clinical Rationale:
+        Under standard RandCropByPosNegLabeld, massive core lesions (>50,000 voxels) consume
+        over 99.9% of crop centers, leaving small punctate satellites (<50 voxels) virtually
+        untrained. This transform labels individual 3D connected components (islands) via
+        scipy.ndimage.label and assigns equal probability (1/K) to each component, guaranteeing
+        that punctate and micro-ischemic infarcts receive robust representation in the training stream.
+    """
+
+    def __init__(
+        self,
+        keys: Sequence[str],
+        label_key: str = "mask",
+        spatial_size: Tuple[int, int, int] = (96, 96, 64),
+        pos: float = 1.0,
+        neg: float = 1.0,
+        num_samples: int = 2,
+    ):
+        super().__init__(keys)
+        self.label_key = label_key
+        self.spatial_size = np.asarray(spatial_size, dtype=int)
+        self.pos = float(pos)
+        self.neg = float(neg)
+        self.num_samples = int(num_samples)
+
+    def __call__(self, data: dict) -> list:
+        d = dict(data)
+        mask_obj = d[self.label_key]
+        is_torch = isinstance(mask_obj, torch.Tensor)
+        m_arr = mask_obj.detach().cpu().numpy() if is_torch else np.asarray(mask_obj)
+
+        # Squeeze channel if channel-first [C, D, H, W]
+        if m_arr.ndim == 4:
+            m_spatial = m_arr[0]
+        else:
+            m_spatial = m_arr
+
+        labeled, n_components = label((m_spatial > 0).astype(np.uint8))
+        shape = np.array(m_spatial.shape)
+        half_patch = self.spatial_size // 2
+
+        samples = []
+        total_ratio = self.pos + self.neg
+        pos_prob = self.pos / total_ratio if total_ratio > 0 else 0.5
+
+        for _ in range(self.num_samples):
+            pick_pos = (np.random.rand() < pos_prob) and (n_components > 0)
+            if pick_pos:
+                comp_idx = np.random.randint(1, n_components + 1)
+                coords = np.argwhere(labeled == comp_idx)
+                center = coords[np.random.randint(len(coords))]
+            else:
+                # Random foreground/brain center
+                center = np.array([np.random.randint(0, s) for s in shape])
+
+            start = np.maximum(0, center - half_patch)
+            end = start + self.spatial_size
+            shift = np.maximum(0, end - shape)
+            start = np.maximum(0, start - shift)
+            end = start + self.spatial_size
+
+            slices = tuple(slice(int(s), int(e)) for s, e in zip(start, end))
+
+            sample = {}
+            for k in self.keys:
+                item = d[k]
+                if is_torch and isinstance(item, torch.Tensor):
+                    sample[k] = item[(slice(None),) + slices]
+                else:
+                    sample[k] = item[(slice(None),) + slices]
+            samples.append(sample)
+
+        return samples
+
+
 def _build_load_and_fuse_steps(
     modalities: Optional[Sequence[str]] = None,
     use_edwi: bool = False,
@@ -136,6 +214,7 @@ def get_train_transforms(
     modalities: Optional[Sequence[str]] = None,
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
+    sampling_mode: str = "standard",
 ) -> mt.Compose:
     """Builds the training transform pipeline with Paper 32 augmentations and foreground isolation."""
     load_and_fuse_steps = _build_load_and_fuse_steps(
@@ -144,6 +223,27 @@ def get_train_transforms(
         clip_limit=clip_limit,
         tile_grid_size=tile_grid_size,
     )
+
+    if sampling_mode == "component_aware":
+        crop_step = RandCropByConnectedComponentsd(
+            keys=["image", "mask"],
+            label_key="mask",
+            spatial_size=patch_size,
+            pos=pos_ratio,
+            neg=neg_ratio,
+            num_samples=num_samples,
+        )
+    else:
+        crop_step = mt.RandCropByPosNegLabeld(
+            keys=["image", "mask"],
+            label_key="mask",
+            spatial_size=patch_size,
+            pos=pos_ratio,
+            neg=neg_ratio,
+            num_samples=num_samples,
+            image_key="image",
+            image_threshold=0,
+        )
 
     common_steps = [
         # 5. Ensure binary mask values {0, 1}
@@ -179,17 +279,8 @@ def get_train_transforms(
             mode="constant",
             constant_values=0,
         ),
-        # 11. Balanced Pos/Neg patch cropping to overcome stroke class imbalance
-        mt.RandCropByPosNegLabeld(
-            keys=["image", "mask"],
-            label_key="mask",
-            spatial_size=patch_size,
-            pos=pos_ratio,
-            neg=neg_ratio,
-            num_samples=num_samples,
-            image_key="image",
-            image_threshold=0,
-        ),
+        # 11. Balanced patch cropping (standard or component-aware)
+        crop_step,
         # 12. Full 7 Data Augmentations from Paper 32 (Factorizer Appendix A):
         # 12.1 Random 3D Affine transform (rotation [-30, 30] deg, scaling [0.7, 1.3], prob 0.15)
         mt.RandAffined(

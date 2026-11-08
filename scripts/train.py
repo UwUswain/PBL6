@@ -380,6 +380,10 @@ def main() -> None:
             "-> RAM Cache disabled: Wrapping data with standard monai.data.Dataset for memory efficiency."
         )
 
+    sampling_mode = cfg["data"].get("sampling_mode", cfg["experiment"].get("sampling_mode", "standard"))
+    if sampling_mode == "component_aware":
+        logger.info("-> Active Sampling: Component-Aware Cropping (balanced micro-lesion oversampling enabled).")
+
     train_loader, val_loader = build_kfold_dataloaders(
         data_dir=args.data_dir,
         fold=args.fold,
@@ -392,6 +396,7 @@ def main() -> None:
         use_edwi=use_edwi,
         modalities=modalities,
         in_channels=in_channels,
+        sampling_mode=sampling_mode,
     )
 
     # =========================================================================

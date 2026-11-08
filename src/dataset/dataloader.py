@@ -73,12 +73,15 @@ def build_kfold_dataloaders(
     if modalities is None and in_channels == 2:
         modalities = ["dwi", "adc"]
 
+    sampling_mode = kwargs.get("sampling_mode", "standard")
+
     train_transforms = get_train_transforms(
         patch_size=patch_size,
         target_spacing=target_spacing,
         num_samples=num_samples,
         use_edwi=use_edwi,
         modalities=modalities,
+        sampling_mode=sampling_mode,
     )
     val_transforms = get_val_transforms(
         target_spacing=target_spacing,
