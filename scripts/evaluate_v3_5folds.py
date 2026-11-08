@@ -125,14 +125,17 @@ def evaluate_single_case(
     pred_raw: np.ndarray,
     gt_raw: np.ndarray,
     voxel_spacing: Sequence[float] = (1.0, 1.0, 1.0),
-    min_island_size: int = 15,
+    min_island_size: Optional[int] = None,
+    min_island_ml: float = 0.008,
 ) -> Dict[str, Union[float, int]]:
     """Evaluates one subject across all ISLES-2022 metrics including post-processing."""
-    # Apply 3D connected component postprocessing
-    if min_island_size > 0:
-        pred_clean = remove_small_lesion_islands(pred_raw, min_size_voxels=min_island_size)
-    else:
-        pred_clean = pred_raw
+    # Apply physical-volume aware 3D connected component postprocessing
+    pred_clean = remove_small_lesion_islands(
+        pred_raw,
+        min_size_voxels=min_island_size if (min_island_size is not None and min_island_size > 0) else None,
+        min_size_ml=min_island_ml,
+        voxel_spacing=voxel_spacing,
+    )
 
     # 1. Dice Score
     dsc = compute_dice(pred_clean, gt_raw)
@@ -232,8 +235,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-island-size",
         type=int,
-        default=15,
-        help="Minimum 3D connected component island size in voxels (default: 15).",
+        default=0,
+        help="Explicit minimum 3D island size in voxels (0 for physical volume calculation).",
+    )
+    parser.add_argument(
+        "--min-island-ml",
+        type=float,
+        default=0.008,
+        help="Physical volume threshold in mL (default: 0.008 mL = 8 mm³).",
     )
     parser.add_argument(
         "--max-cases",
@@ -314,7 +323,8 @@ def main() -> None:
                 pred_raw=pred_bin,
                 gt_raw=gt_bin,
                 voxel_spacing=(1.0, 1.0, 1.0),
-                min_island_size=args.min_island_size,
+                min_island_size=args.min_island_size if args.min_island_size > 0 else None,
+                min_island_ml=args.min_island_ml,
             )
 
             res["fold"] = fold
