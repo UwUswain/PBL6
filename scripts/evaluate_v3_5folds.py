@@ -227,6 +227,18 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store evaluation reports and CSV files.",
     )
     parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Optional custom checkpoint path to evaluate instead of DEFAULT_V3_CHECKPOINTS.",
+    )
+    parser.add_argument(
+        "--report-name",
+        type=str,
+        default=None,
+        help="Optional custom report file base name without extension.",
+    )
+    parser.add_argument(
         "--overlap",
         type=float,
         default=0.25,
@@ -271,7 +283,7 @@ def main() -> None:
     all_case_records: List[Dict[str, Union[str, float, int]]] = []
 
     for fold in target_folds:
-        ckpt_path = DEFAULT_V3_CHECKPOINTS[fold]
+        ckpt_path = args.checkpoint if args.checkpoint else DEFAULT_V3_CHECKPOINTS[fold]
         logger.info("\n>>> STARTING EVALUATION: FOLD %d (Checkpoint: %s)...", fold, ckpt_path)
 
         model = load_v3_model(
@@ -355,7 +367,13 @@ def main() -> None:
 
     # Create summary DataFrame
     df_results = pd.DataFrame(all_case_records)
-    csv_path = output_dir / f"dual_segresnet_v3_eval_{'all_folds' if args.fold == 'all' else f'fold{args.fold}'}.csv"
+    if args.report_name:
+        csv_path = output_dir / f"{args.report_name}_cases.csv"
+        md_path = output_dir / f"{args.report_name}.md"
+    else:
+        csv_path = output_dir / f"dual_segresnet_v3_eval_{'all_folds' if args.fold == 'all' else f'fold{args.fold}'}.csv"
+        md_path = output_dir / f"dual_segresnet_v3_clinical_report_{'all_folds' if args.fold == 'all' else f'fold{args.fold}'}.md"
+
     df_results.to_csv(csv_path, index=False)
     logger.info("\nSaved case-level evaluation metrics to: %s", csv_path)
 
@@ -387,9 +405,10 @@ def main() -> None:
     for s_name, s_data in subgroups.items():
         subgroup_table += f"| **{s_name}** | {s_data['count']} | **{s_data['mean_dsc']:.4f}** | {s_data['mean_hd95']:.2f} mm | {s_data['mean_avd']:.2f} mL | {s_data['mean_lcd']:.2f} | **{s_data['mean_f1']:.4f}** |\n"
 
-    report_content = f"""# Báo Cáo Lâm Sàng: Đánh Giá Toàn Diện ISLES-2022 Suite (Dual-Encoder SegResNet V3)
+    report_content = f"""# Báo Cáo Lâm Sàng: Đánh Giá Toàn Diện ISLES-2022 Suite ({args.report_name or 'Dual-Encoder SegResNet V3'})
 
-> **Mô hình:** `DualEncoderSegResNet V3` (36.8M params, BiCrossAttention, DiceFocalLoss, Post-Processing)  
+> **Mô hình:** `DualEncoderSegResNet` (36.8M params, BiCrossAttention, DiceFocalLoss, Post-Processing)  
+> **Trọng số:** `{ckpt_path}`  
 > **Tập kiểm định:** ISLES-2022 Out-Of-Fold ({'Toàn bộ 5 Folds' if args.fold == 'all' else f'Fold {args.fold}'}, Tổng cộng {len(df_results)} ca)  
 > **Thời điểm đánh giá:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 
@@ -418,7 +437,6 @@ def main() -> None:
 - **Khả năng bắt tổn thương vi mô (< 5 mL):** Nhờ cơ chế `DiceFocalLoss` và `BiCrossAttention`, chỉ số Lesion F1 ở nhóm tổn thương nhỏ được cải thiện rõ rệt, chứng minh tính vượt trội so với baseline U-Net 2D/3D thông thường.
 """
 
-    md_path = output_dir / f"dual_segresnet_v3_clinical_report_{'all_folds' if args.fold == 'all' else f'fold{args.fold}'}.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(report_content)
     logger.info("Saved clinical markdown report to: %s", md_path)
