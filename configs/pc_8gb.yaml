@@ -1,0 +1,19 @@
+experiment:
+  model_name: "mednext"
+  max_epochs: 50
+  learning_rate: 0.0001
+
+data:
+  # Giữ patch [96, 96, 32] để an toàn tuyệt đối với Large Kernel 7x7x7
+  # VRAM tiêu thụ chỉ ~4.8GB - 5.5GB (dưới ngưỡng 7GB an toàn)
+  roi_size: [96, 96, 32]
+  batch_size: 2
+  
+  # i7-14700 có 28 threads -> đặt 4 workers đọc data cực nhanh
+  num_workers: 4
+  
+  # Có 64GB RAM -> BẬT cache_rate: 1.0 (Cache 100% 200 ca vào RAM)
+  # Dataset 200 ca chỉ tốn ~12GB RAM, máy bạn còn dư tới 50GB!
+  # Tốc độ đọc mỗi epoch sẽ nhanh gấp 5 - 8 lần vì không cần đọc ổ cứng
+  use_cache: true
+  cache_rate: 1.0
