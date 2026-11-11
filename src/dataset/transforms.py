@@ -1,12 +1,14 @@
 """MONAI data transforms for multi-modal 3D MRI preprocessing in ISLES-2022."""
 
+from copy import deepcopy
 from typing import Optional, Sequence, Tuple, Union
 import cv2
 import monai.data as md
 import monai.transforms as mt
+from monai.transforms.utils import correct_crop_centers, map_binary_to_indices
 import numpy as np
 import torch
-from scipy.ndimage import label
+from scipy import ndimage
 
 
 def _binarize_mask(m):
@@ -89,7 +91,7 @@ class GenerateEnhancedDWId(mt.MapTransform):
         return d
 
 
-class RandCropByConnectedComponentsd(mt.MapTransform):
+class RandCropByConnectedComponentsd(mt.Randomizable, mt.MapTransform, mt.MultiSampleTrait):
     """3D patch cropping centered uniformly across distinct connected stroke lesions.
 
     Clinical Rationale:
@@ -98,6 +100,14 @@ class RandCropByConnectedComponentsd(mt.MapTransform):
         untrained. This transform labels individual 3D connected components (islands) via
         scipy.ndimage.label and assigns equal probability (1/K) to each component, guaranteeing
         that punctate and micro-ischemic infarcts receive robust representation in the training stream.
+
+    Controlled Parity with RandCropByPosNegLabeld:
+        - Inherits monai.transforms.Randomizable and MultiSampleTrait so CacheDataset
+          correctly caches ONLY up to the pre-crop deterministic transforms and re-crops
+          dynamically on every epoch via self.R.
+        - Uses MONAI's exact map_binary_to_indices(..., image_threshold) for negative/background
+          center sampling and correct_crop_centers(...) for boundary clamping, ensuring the ONLY
+          difference from RandCropByPosNegLabeld is uniform component-wise positive center selection.
     """
 
     def __init__(
@@ -108,62 +118,147 @@ class RandCropByConnectedComponentsd(mt.MapTransform):
         pos: float = 1.0,
         neg: float = 1.0,
         num_samples: int = 2,
+        image_key: Optional[str] = "image",
+        image_threshold: float = 0.0,
+        allow_smaller: bool = False,
+        connectivity: int = 26,
+        allow_missing_keys: bool = False,
     ):
-        super().__init__(keys)
+        mt.MapTransform.__init__(self, keys, allow_missing_keys)
         self.label_key = label_key
-        self.spatial_size = np.asarray(spatial_size, dtype=int)
+        self.image_key = image_key
+        self.image_threshold = float(image_threshold)
+        self.spatial_size = tuple(int(s) for s in spatial_size)
         self.pos = float(pos)
         self.neg = float(neg)
         self.num_samples = int(num_samples)
+        self.allow_smaller = bool(allow_smaller)
+
+        if connectivity == 6:
+            self.connectivity_rank = 1
+        elif connectivity == 18:
+            self.connectivity_rank = 2
+        elif connectivity == 26:
+            self.connectivity_rank = 3
+        else:
+            raise ValueError(f"Unsupported connectivity: {connectivity}. Choose from [6, 18, 26].")
+
+        self._structure = ndimage.generate_binary_structure(3, self.connectivity_rank)
+        self.R = np.random.RandomState()
+        self.centers: Optional[Tuple[Tuple[int, ...], ...]] = None
+
+    def randomize(
+        self,
+        label_img: Union[np.ndarray, torch.Tensor],
+        image: Optional[Union[np.ndarray, torch.Tensor]] = None,
+    ) -> None:
+        """Selects balanced positive (uniform over components) and negative crop centers."""
+        if isinstance(label_img, torch.Tensor) and label_img.ndim == 3:
+            label_cf = label_img.unsqueeze(0)
+        elif isinstance(label_img, np.ndarray) and label_img.ndim == 3:
+            label_cf = label_img[np.newaxis, ...]
+        else:
+            label_cf = label_img
+
+        if image is not None and isinstance(image, torch.Tensor) and image.ndim == 3:
+            image_cf = image.unsqueeze(0)
+        elif image is not None and isinstance(image, np.ndarray) and image.ndim == 3:
+            image_cf = image[np.newaxis, ...]
+        else:
+            image_cf = image
+
+        fg_indices, bg_indices = map_binary_to_indices(
+            label_cf, image_cf, self.image_threshold
+        )
+
+        if isinstance(label_cf, md.MetaTensor):
+            spatial_shape = tuple(int(x) for x in label_cf.peek_pending_shape())
+        else:
+            spatial_shape = tuple(int(x) for x in label_cf.shape[1:])
+
+        n_fg = int(len(fg_indices))
+        n_bg = int(len(bg_indices))
+        if n_fg == 0 and n_bg == 0:
+            raise ValueError("No sampling location available.")
+
+        if n_fg == 0:
+            eff_pos_ratio = 0.0
+        elif n_bg == 0:
+            eff_pos_ratio = 1.0
+        else:
+            total_ratio = self.pos + self.neg
+            eff_pos_ratio = self.pos / total_ratio if total_ratio > 0 else 0.5
+
+        if torch.is_tensor(bg_indices):
+            bg_indices_np = bg_indices.detach().cpu().numpy()
+        else:
+            bg_indices_np = np.asarray(bg_indices)
+
+        sample_is_pos = [bool(self.R.rand() < eff_pos_ratio) for _ in range(self.num_samples)]
+
+        labeled = None
+        n_components = 0
+        obj_slices = []
+        if any(sample_is_pos) and n_fg > 0:
+            if isinstance(label_cf, torch.Tensor):
+                m_np = label_cf.detach().cpu().numpy()
+            else:
+                m_np = np.asarray(label_cf)
+            if m_np.shape[0] > 1:
+                m_spatial = np.any(m_np[1:] > 0, axis=0)
+            else:
+                m_spatial = m_np[0] > 0
+            labeled, n_components = ndimage.label(m_spatial.astype(np.uint8), structure=self._structure)
+            if n_components > 0:
+                obj_slices = ndimage.find_objects(labeled)
+
+        centers = []
+        for is_pos in sample_is_pos:
+            if is_pos and n_components > 0 and labeled is not None:
+                comp_idx = int(self.R.randint(1, n_components + 1))
+                slc = obj_slices[comp_idx - 1]
+                if slc is not None:
+                    local_coords = np.argwhere(labeled[slc] == comp_idx)
+                    picked = local_coords[int(self.R.randint(len(local_coords)))]
+                    center = [
+                        int(picked[dim] + slc[dim].start)
+                        for dim in range(len(spatial_shape))
+                    ]
+                else:
+                    coords = np.argwhere(labeled == comp_idx)
+                    center = [int(c) for c in coords[int(self.R.randint(len(coords)))]]
+            else:
+                rand_idx = int(self.R.randint(len(bg_indices_np)))
+                flat_idx = int(bg_indices_np[rand_idx])
+                center = [int(c) for c in np.unravel_index(flat_idx, spatial_shape)]
+
+            corrected = correct_crop_centers(
+                center,
+                self.spatial_size,
+                spatial_shape,
+                allow_smaller=self.allow_smaller,
+            )
+            centers.append(tuple(int(c) for c in corrected))
+
+        self.centers = tuple(centers)
 
     def __call__(self, data: dict) -> list:
         d = dict(data)
-        mask_obj = d[self.label_key]
-        is_torch = isinstance(mask_obj, torch.Tensor)
-        m_arr = mask_obj.detach().cpu().numpy() if is_torch else np.asarray(mask_obj)
+        img_ref = d.get(self.image_key) if self.image_key is not None else None
+        self.randomize(d[self.label_key], img_ref)
 
-        # Squeeze channel if channel-first [C, D, H, W]
-        if m_arr.ndim == 4:
-            m_spatial = m_arr[0]
-        else:
-            m_spatial = m_arr
+        assert self.centers is not None
+        ret = [dict(d) for _ in range(self.num_samples)]
+        for i in range(self.num_samples):
+            for key in set(d.keys()).difference(set(self.keys)):
+                ret[i][key] = deepcopy(d[key])
 
-        labeled, n_components = label((m_spatial > 0).astype(np.uint8))
-        shape = np.array(m_spatial.shape)
-        half_patch = self.spatial_size // 2
+        for i, center in enumerate(self.centers):
+            cropper = mt.SpatialCrop(roi_center=center, roi_size=self.spatial_size)
+            for key in self.key_iterator(d):
+                ret[i][key] = cropper(d[key])
 
-        samples = []
-        total_ratio = self.pos + self.neg
-        pos_prob = self.pos / total_ratio if total_ratio > 0 else 0.5
-
-        for _ in range(self.num_samples):
-            pick_pos = (np.random.rand() < pos_prob) and (n_components > 0)
-            if pick_pos:
-                comp_idx = np.random.randint(1, n_components + 1)
-                coords = np.argwhere(labeled == comp_idx)
-                center = coords[np.random.randint(len(coords))]
-            else:
-                # Random foreground/brain center
-                center = np.array([np.random.randint(0, s) for s in shape])
-
-            start = np.maximum(0, center - half_patch)
-            end = start + self.spatial_size
-            shift = np.maximum(0, end - shape)
-            start = np.maximum(0, start - shift)
-            end = start + self.spatial_size
-
-            slices = tuple(slice(int(s), int(e)) for s, e in zip(start, end))
-
-            sample = {}
-            for k in self.keys:
-                item = d[k]
-                if is_torch and isinstance(item, torch.Tensor):
-                    sample[k] = item[(slice(None),) + slices]
-                else:
-                    sample[k] = item[(slice(None),) + slices]
-            samples.append(sample)
-
-        return samples
+        return ret
 
 
 def _build_load_and_fuse_steps(
@@ -232,6 +327,10 @@ def get_train_transforms(
             pos=pos_ratio,
             neg=neg_ratio,
             num_samples=num_samples,
+            image_key="image",
+            image_threshold=0,
+            allow_smaller=False,
+            connectivity=26,
         )
     else:
         crop_step = mt.RandCropByPosNegLabeld(

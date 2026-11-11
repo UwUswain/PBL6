@@ -2,13 +2,17 @@
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import nibabel as nib
 import numpy as np
 from scipy import ndimage
+import torch
+
+from scripts.evaluate_paired_fold import compute_case_hd95, order_postprocess_modes
 
 from src.metrics.dice import compute_dice
 from src.metrics.evaluator import ISLESBatchEvaluator, evaluate_isles_case
-from src.metrics.lesion import compute_lesion_metrics
+from src.metrics.lesion import analyze_gt_components, compute_lesion_metrics
 from src.metrics.volume import (
     compute_absolute_volume_difference,
     compute_lesion_volume,
@@ -186,6 +190,65 @@ class TestISLESMetrics(unittest.TestCase):
         # Volume of dilated should be strictly greater than GT
         self.assertGreater(res_dilated.pred_volume_ml, res_dilated.gt_volume_ml)
         self.assertGreater(res_dilated.avd_ml, 0.0)
+
+    def test_fp_and_component_level_detection(self) -> None:
+        """Tests FP lesion tracking and per-component satellite recall in multi-lesion scans."""
+        gt = np.zeros(self.shape, dtype=np.uint8)
+        gt[5:20, 5:20, 5:15] = 1      # Comp 1: 15*15*10 = 2250 vox (4.5 mL at 2 mm^3)
+        gt[45:48, 45:48, 20:22] = 1   # Comp 2: 3*3*2 = 18 vox (0.036 mL satellite)
+
+        pred = np.zeros(self.shape, dtype=np.uint8)
+        pred[5:20, 5:20, 5:15] = 1    # TP matching Comp 1
+        pred[30:35, 30:35, 5:10] = 1  # False Positive component
+
+        res = compute_lesion_metrics(pred, gt, iou_threshold=0.2, connectivity=26)
+        self.assertEqual(res["tp_gt"], 1)
+        self.assertEqual(res["tp_pred"], 1)
+        self.assertEqual(res["fp_lesions"], 1)
+        self.assertEqual(res["fn_lesions"], 1)
+
+        comp_rows = analyze_gt_components(pred, gt, voxel_spacing=self.spacing)
+        self.assertEqual(len(comp_rows), 2)
+        self.assertTrue(all(r["is_multi_lesion_case"] for r in comp_rows))
+        small_row = min(comp_rows, key=lambda r: r["comp_voxels"])
+        large_row = max(comp_rows, key=lambda r: r["comp_voxels"])
+        self.assertTrue(large_row["detected_iou20"])
+        self.assertFalse(small_row["detected_iou20"])
+        self.assertAlmostEqual(small_row["comp_vol_ml"], 0.036, places=5)
+
+    def test_hd95_conventions_and_no_exception_swallow(self) -> None:
+        """Verifies HD95 empty rules and ensures computation errors/NaNs are never swallowed as 100.0."""
+        empty = np.zeros((16, 16, 16), dtype=np.uint8)
+        non_empty = np.zeros((16, 16, 16), dtype=np.uint8)
+        non_empty[4:8, 4:8, 4:8] = 1
+        shifted = np.zeros((16, 16, 16), dtype=np.uint8)
+        shifted[6:10, 4:8, 4:8] = 1
+
+        self.assertEqual(compute_case_hd95(empty, empty, case_id="both_empty"), (0.0, False))
+        self.assertEqual(compute_case_hd95(empty, non_empty, case_id="pred_empty"), (100.0, True))
+        self.assertEqual(compute_case_hd95(non_empty, empty, case_id="gt_empty"), (100.0, True))
+
+        val, is_pen = compute_case_hd95(non_empty, shifted, voxel_spacing=(1.0, 1.0, 1.0), case_id="valid")
+        self.assertFalse(is_pen)
+        self.assertTrue(np.isfinite(val))
+        self.assertGreater(val, 0.0)
+
+        with self.assertRaises(ValueError):
+            compute_case_hd95(np.zeros((8, 8, 8)), non_empty, case_id="mismatch")
+
+        with patch("scripts.evaluate_paired_fold.compute_hausdorff_distance", return_value=torch.tensor([[float("nan")]])):
+            with self.assertRaises(RuntimeError):
+                compute_case_hd95(non_empty, shifted, case_id="nan_case")
+
+        with patch("scripts.evaluate_paired_fold.compute_hausdorff_distance", side_effect=RuntimeError("monai_fail")):
+            with self.assertRaises(RuntimeError):
+                compute_case_hd95(non_empty, shifted, case_id="err_case")
+
+    def test_postprocess_mode_ordering_keeps_raw_primary(self) -> None:
+        """Verifies raw always appears first as primary endpoint when present."""
+        self.assertEqual(order_postprocess_modes(["0.008ml", "raw"]), ["raw", "0.008ml"])
+        self.assertEqual(order_postprocess_modes(["15vox", "0.008ml", "raw", "raw"]), ["raw", "15vox", "0.008ml"])
+        self.assertEqual(order_postprocess_modes(["0.008ml"]), ["0.008ml"])
 
 
 if __name__ == "__main__":
