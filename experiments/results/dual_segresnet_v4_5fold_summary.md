@@ -73,3 +73,4 @@ Toàn bộ 250 ca được phân tách thành 3 nhóm bệnh học lâm sàng r�
    - Median HD95 trên toàn bộ tập dữ liệu đạt **`4.42 mm`** — vùng mặt nạ dự đoán bám sát bờ rãnh não và các nhánh động mạch não giữa (MCA), không gây báo động giả sang mô lành.
 3. **Tính ổn định của phân vùng diện rộng (> 30 mL):**
    - Duy trì Dice **`85.12%`**, khẳng định mô hình không bị hy sinh khả năng học vùng lõi hoại tử lớn khi tập trung vào các vệ tinh vi mô.
+

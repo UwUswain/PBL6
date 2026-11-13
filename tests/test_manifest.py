@@ -297,6 +297,10 @@ class TestManifestAndDryRun(unittest.TestCase):
                     "--postprocess-modes",
                     "0.008ml",
                     "raw",
+                    "--sweep-thresholds",
+                    "0.45",
+                    "0.50",
+                    "0.55",
                     "--allow-dry-run",
                     "--output-dir",
                     str(eval_out),
@@ -317,7 +321,75 @@ class TestManifestAndDryRun(unittest.TestCase):
                 report_text.index("## Kết Quả Chính: `raw`"),
                 report_text.index("## Phân Tích Bổ Sung: `0.008ml`"),
             )
+            self.assertLess(
+                report_text.index("## Phân Tích Bổ Sung: `0.008ml`"),
+                report_text.index("## Phân Tích Thăm Dò (Exploratory Analysis)"),
+            )
             self.assertIn("Train Split SHA-256", report_text)
+            self.assertIn("Đường Cong Recall–FP", report_text)
+            self.assertTrue((eval_out / "paired_fold0_threshold_sweep_summary.csv").is_file())
+            self.assertTrue((eval_out / "paired_fold0_threshold_sweep_cases.csv").is_file())
+            self.assertTrue((eval_out / "paired_fold0_threshold_sweep_components.csv").is_file())
+
+    def test_threshold_sweep_bracketing_and_fp_matching(self) -> None:
+        """Verifies exploratory threshold sweep summary and FP bracketing logic."""
+        import pandas as pd
+        from scripts.evaluate_paired_fold import (
+            _format_threshold_sweep_section,
+            normalize_sweep_thresholds,
+            summarize_threshold_sweep,
+        )
+
+        self.assertEqual(normalize_sweep_thresholds([0.65, 0.50, 0.50, 0.45]), [0.45, 0.5, 0.65])
+        with self.assertRaises(ValueError):
+            normalize_sweep_thresholds([0.0, 0.5])
+
+        summary = pd.DataFrame(
+            [
+                {
+                    "model": "V3_PosNeg", "threshold": 0.50, "postprocess": "0.008ml", "n_cases": 50,
+                    "fp_per_case": 3.26, "total_fp": 163, "micro_total": 352,
+                    "micro_detected_iou20": 113, "micro_recall_iou20": 113 / 352,
+                    "micro_touched_any": 150, "micro_any_hit_rate": 150 / 352,
+                    "all_comp_total": 542, "all_comp_detected_iou20": 261, "all_comp_recall_iou20": 261 / 542,
+                    "all_comp_touched_any": 324, "all_comp_any_hit_rate": 324 / 542,
+                    "dsc_mean": 0.6784, "dsc_median": 0.7466, "hd95_mean": 23.18, "hd95_median": 8.60,
+                    "avd_mean": 3.93, "lcd_mean": 5.10, "lesion_f1_mean": 0.6099, "lesion_f1_median": 0.6372,
+                    "lesion_precision_mean": 0.6072, "lesion_recall_mean": 0.6860,
+                },
+                {
+                    "model": "V4_Component", "threshold": 0.55, "postprocess": "0.008ml", "n_cases": 50,
+                    "fp_per_case": 3.60, "total_fp": 180, "micro_total": 352,
+                    "micro_detected_iou20": 116, "micro_recall_iou20": 116 / 352,
+                    "micro_touched_any": 152, "micro_any_hit_rate": 152 / 352,
+                    "all_comp_total": 542, "all_comp_detected_iou20": 262, "all_comp_recall_iou20": 262 / 542,
+                    "all_comp_touched_any": 330, "all_comp_any_hit_rate": 330 / 542,
+                    "dsc_mean": 0.6830, "dsc_median": 0.7520, "hd95_mean": 23.50, "hd95_median": 8.30,
+                    "avd_mean": 4.20, "lcd_mean": 5.40, "lesion_f1_mean": 0.6150, "lesion_f1_median": 0.6500,
+                    "lesion_precision_mean": 0.6200, "lesion_recall_mean": 0.6700,
+                },
+                {
+                    "model": "V4_Component", "threshold": 0.60, "postprocess": "0.008ml", "n_cases": 50,
+                    "fp_per_case": 2.90, "total_fp": 145, "micro_total": 352,
+                    "micro_detected_iou20": 110, "micro_recall_iou20": 110 / 352,
+                    "micro_touched_any": 145, "micro_any_hit_rate": 145 / 352,
+                    "all_comp_total": 542, "all_comp_detected_iou20": 258, "all_comp_recall_iou20": 258 / 542,
+                    "all_comp_touched_any": 320, "all_comp_any_hit_rate": 320 / 542,
+                    "dsc_mean": 0.6790, "dsc_median": 0.7480, "hd95_mean": 23.90, "hd95_median": 8.50,
+                    "avd_mean": 4.10, "lcd_mean": 4.90, "lesion_f1_mean": 0.6220, "lesion_f1_median": 0.6550,
+                    "lesion_precision_mean": 0.6400, "lesion_recall_mean": 0.6500,
+                },
+            ]
+        )
+        section = _format_threshold_sweep_section(summary, sweep_pp_mode="0.008ml", default_threshold=0.50)
+        self.assertIn("3.26 FP/ca", section)
+        self.assertIn("Kẹp trên", section)
+        self.assertIn("Kẹp dưới", section)
+        self.assertIn("Đường Cong Recall–FP", section)
+
+        # Ensure summarize_threshold_sweep aggregates empty micro subsets cleanly
+        empty_summary = summarize_threshold_sweep(pd.DataFrame(), pd.DataFrame())
+        self.assertTrue(empty_summary.empty)
 
 
 if __name__ == "__main__":

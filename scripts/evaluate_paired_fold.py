@@ -28,6 +28,7 @@ from monai.metrics import compute_hausdorff_distance
 import numpy as np
 import pandas as pd
 import torch
+import cc3d
 
 from src.dataset.parser import (
     compute_split_fingerprint,
@@ -37,6 +38,7 @@ from src.dataset.parser import (
 )
 from src.dataset.transforms import get_val_transforms
 from src.metrics.dice import compute_dice
+from src.metrics.eval_utils import compute_lesion_f1_score
 from src.metrics.lesion import analyze_gt_components, compute_lesion_metrics
 from src.metrics.volume import (
     compute_absolute_volume_difference,
@@ -74,6 +76,32 @@ def parse_args() -> argparse.Namespace:
         choices=["raw", "0.008ml", "15vox"],
         help="Post-processing modes evaluated from the same forward pass ('raw' is always primary).",
     )
+    parser.add_argument(
+        "--sweep-thresholds",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Optional exploratory probability thresholds (e.g. 0.45 0.50 0.55 0.60 0.65) evaluated from the same forward pass.",
+    )
+    parser.add_argument(
+        "--sweep-postprocess",
+        type=str,
+        default="0.008ml",
+        choices=["raw", "0.008ml", "15vox"],
+        help="Post-processing mode used for exploratory threshold sweep (default: 0.008ml).",
+    )
+    parser.add_argument(
+        "--sweep-target-fp",
+        type=float,
+        default=None,
+        help="Optional reference FP/case target for exploratory operating-point comparison (defaults to V3 at --threshold).",
+    )
+    parser.add_argument(
+        "--cache-probs-dir",
+        type=str,
+        default=None,
+        help="Optional directory to cache predicted probability volumes (float16) to avoid re-inferring.",
+    )
     parser.add_argument("--output-dir", type=str, default="experiments/results", help="Report output dir.")
     parser.add_argument("--max-cases", type=int, default=-1, help="Optional cap for smoke checks.")
     parser.add_argument("--strict-isles250", action="store_true", help="Require exact 250 ISLES cases.")
@@ -91,6 +119,31 @@ def parse_args() -> argparse.Namespace:
         "--allow-env-mismatch",
         action="store_true",
         help="Allow differing Python/package dependency versions between V3 and V4 checkpoints.",
+    )
+    parser.add_argument(
+        "--allow-param-mismatch",
+        action="store_true",
+        help="Allow comparing checkpoints with differing hyperparameters (e.g. patch size, epochs, or two V3 variants) while still strictly enforcing identical 250-case dataset, Fold 0 split hash, and test cases.",
+    )
+    parser.add_argument(
+        "--sw-roi-size",
+        nargs=3,
+        type=int,
+        default=None,
+        metavar=("H", "W", "D"),
+        help="Explicit sliding-window ROI size for inference (e.g. 96 96 64). If not specified, uses val_roi_size or roi_size from manifest.",
+    )
+    parser.add_argument(
+        "--model-v3-name",
+        type=str,
+        default="V3_PosNeg",
+        help="Display label for Model A (default: V3_PosNeg).",
+    )
+    parser.add_argument(
+        "--model-v4-name",
+        type=str,
+        default="V4_Component",
+        help="Display label for Model B (default: V4_Component).",
     )
     parser.add_argument(
         "--skip-manifest-check",
@@ -231,6 +284,16 @@ def evaluate_prediction_volume(
     avd = compute_absolute_volume_difference(pred_clean, gt_bin, voxel_spacing)
     lesion_res = compute_lesion_metrics(pred_clean, gt_bin, iou_threshold=0.2, connectivity=26)
 
+    # Official ISLES-2022 Scorer metrics:
+    official_f1 = compute_lesion_f1_score(gt_bin, pred_clean, empty_value=1.0, connectivity=26)
+    pred_labeled, num_pred_cc = cc3d.connected_components(pred_clean > 0, connectivity=26, return_N=True)
+    if num_pred_cc > 0:
+        overlapping_labels = set(np.unique(pred_labeled[gt_bin > 0]))
+        overlapping_labels.discard(0)
+        official_fp = int(num_pred_cc - len(overlapping_labels))
+    else:
+        official_fp = 0
+
     case_row: Dict[str, Any] = {
         "model": model_tag,
         "postprocess": pp_mode,
@@ -253,6 +316,8 @@ def evaluate_prediction_volume(
         "lesion_f1": float(lesion_res["lesion_f1"]),
         "lesion_precision": float(lesion_res["lesion_precision"]),
         "lesion_recall": float(lesion_res["lesion_recall"]),
+        "official_lesion_f1": float(official_f1),
+        "official_fp_lesions": int(official_fp),
     }
 
     comp_rows = analyze_gt_components(pred_clean, gt_bin, voxel_spacing=voxel_spacing)
@@ -306,6 +371,370 @@ def _format_component_bins(comp_df: pd.DataFrame, multi_lesion_only: bool = Fals
     return "\n".join(lines)
 
 
+def normalize_sweep_thresholds(thresholds: Optional[Sequence[float]]) -> List[float]:
+    """Validates, deduplicates, and sorts exploratory probability thresholds."""
+    if not thresholds:
+        return []
+    cleaned = sorted({round(float(t), 6) for t in thresholds})
+    for t in cleaned:
+        if not (0.0 < t < 1.0):
+            raise ValueError(f"Sweep threshold must be strictly in (0, 1), got {t}")
+    return cleaned
+
+
+def _attach_threshold(
+    case_row: Dict[str, Any],
+    comp_rows: Sequence[Dict[str, Any]],
+    threshold: float,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Creates shallow copies of case/component evaluation rows tagged with threshold."""
+    c_copy = dict(case_row)
+    c_copy["threshold"] = float(threshold)
+    k_copies: List[Dict[str, Any]] = []
+    for row in comp_rows:
+        r_copy = dict(row)
+        r_copy["threshold"] = float(threshold)
+        k_copies.append(r_copy)
+    return c_copy, k_copies
+
+
+def summarize_threshold_sweep(
+    df_sweep_cases: pd.DataFrame,
+    df_sweep_comps: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregates case-level and micro-lesion (<0.1 mL) metrics across probability thresholds."""
+    if df_sweep_cases.empty:
+        return pd.DataFrame()
+
+    model_order = ["V3_PosNeg", "V4_Component"]
+    thresholds = sorted(df_sweep_cases["threshold"].unique().tolist())
+    rows: List[Dict[str, Any]] = []
+
+    for model_tag in model_order:
+        for thr in thresholds:
+            sub_c = df_sweep_cases[
+                (df_sweep_cases["model"] == model_tag) & (df_sweep_cases["threshold"] == thr)
+            ]
+            if sub_c.empty:
+                continue
+            sub_k = (
+                df_sweep_comps[
+                    (df_sweep_comps["model"] == model_tag) & (df_sweep_comps["threshold"] == thr)
+                ]
+                if not df_sweep_comps.empty
+                else pd.DataFrame()
+            )
+            micro_k = sub_k[sub_k["comp_vol_ml"] < 0.1] if not sub_k.empty else pd.DataFrame()
+            micro_total = int(len(micro_k))
+            micro_iou = int(micro_k["detected_iou20"].sum()) if micro_total > 0 else 0
+            micro_any = int(micro_k["touched_any"].sum()) if micro_total > 0 else 0
+
+            all_total = int(len(sub_k))
+            all_iou = int(sub_k["detected_iou20"].sum()) if all_total > 0 else 0
+            all_any = int(sub_k["touched_any"].sum()) if all_total > 0 else 0
+
+            official_fp_col = "official_fp_lesions" if "official_fp_lesions" in sub_c.columns else "fp_lesions"
+            official_f1_col = "official_lesion_f1" if "official_lesion_f1" in sub_c.columns else "lesion_f1"
+
+            rows.append(
+                {
+                    "model": model_tag,
+                    "threshold": float(thr),
+                    "postprocess": str(sub_c["postprocess"].iloc[0]),
+                    "n_cases": int(len(sub_c)),
+                    # Nhóm metrics (IoU >= 0.2):
+                    "fp_per_case": float(sub_c["fp_lesions"].mean()),
+                    "total_fp": int(sub_c["fp_lesions"].sum()),
+                    "micro_total": micro_total,
+                    "micro_detected_iou20": micro_iou,
+                    "micro_recall_iou20": float(micro_iou / micro_total) if micro_total > 0 else 0.0,
+                    "lesion_f1_mean": float(sub_c["lesion_f1"].mean()),
+                    "lesion_f1_median": float(sub_c["lesion_f1"].median()),
+                    "lesion_precision_mean": float(sub_c["lesion_precision"].mean()),
+                    "lesion_recall_mean": float(sub_c["lesion_recall"].mean()),
+                    # Scorer ISLES-2022 metrics (Official overlap):
+                    "official_fp_per_case": float(sub_c[official_fp_col].mean()),
+                    "official_total_fp": int(sub_c[official_fp_col].sum()),
+                    "micro_touched_any": micro_any,
+                    "micro_any_hit_rate": float(micro_any / micro_total) if micro_total > 0 else 0.0,
+                    "official_lesion_f1_mean": float(sub_c[official_f1_col].mean()),
+                    "official_lesion_f1_median": float(sub_c[official_f1_col].median()),
+                    # Common:
+                    "all_comp_total": all_total,
+                    "all_comp_detected_iou20": all_iou,
+                    "all_comp_recall_iou20": float(all_iou / all_total) if all_total > 0 else 0.0,
+                    "all_comp_touched_any": all_any,
+                    "all_comp_any_hit_rate": float(all_any / all_total) if all_total > 0 else 0.0,
+                    "dsc_mean": float(sub_c["dsc"].mean()),
+                    "dsc_median": float(sub_c["dsc"].median()),
+                    "hd95_mean": float(sub_c["hd95_mm"].mean()),
+                    "hd95_median": float(sub_c["hd95_mm"].median()),
+                    "avd_mean": float(sub_c["avd_ml"].mean()),
+                    "lcd_mean": float(sub_c["lcd"].mean()),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _format_sweep_row_label(model_tag: str) -> str:
+    return "V3 Pos/Neg" if model_tag == "V3_PosNeg" else "V4-Fixed"
+
+
+def _format_threshold_sweep_section(
+    df_summary: pd.DataFrame,
+    sweep_pp_mode: str,
+    default_threshold: float,
+    target_fp: Optional[float] = None,
+) -> str:
+    """Formats exploratory threshold-sweep tables, operating-point matching, and recall-FP curve."""
+    blocks: List[str] = [
+        "---",
+        "",
+        f"## Phân Tích Thăm Dò (Exploratory Analysis): Quét Ngưỡng Xác Suất Trên `{sweep_pp_mode}`",
+        "",
+        (
+            "> **Ghi chú phương pháp (Exploratory Post-Hoc Sensitivity):** Bảng dưới đây là **phân tích thăm dò** "
+            "chạy từ **cùng một lượt suy luận xác suất** cho mỗi checkpoint (áp dụng chung bộ lọc "
+            f"`{sweep_pp_mode}` và 26-connectivity). Kết quả chính thức theo giao thức "
+            "đã đăng ký vẫn là bảng **`raw` (`prob >= 0.50`)** ở phần trên."
+        ),
+        "",
+        "### 1. Bảng Quét Ngưỡng Đối Chiếu Hai Cách Chấm",
+        "",
+        "#### A. Cách Chấm Của Nhóm (26-connectivity, Ghép Ổ Theo IoU ≥ 0.2)",
+        "| Mô Hình | Ngưỡng | FP/Ca (Tổng FP) ↓ | Ổ < 0.1 mL (IoU>=0.2) ↑ | Tỷ Lệ Phát Hiện ↑ | Dice (Med) ↑ | Lesion F1 (Med) ↑ |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+    ]
+
+    for _, r in df_summary.iterrows():
+        micro_n = int(r["micro_total"])
+        blocks.append(
+            f"| {_format_sweep_row_label(str(r['model']))} | {r['threshold']:.2f} | "
+            f"{r['fp_per_case']:.2f} ({int(r['total_fp'])}) | "
+            f"{int(r['micro_detected_iou20'])}/{micro_n} | "
+            f"{r['micro_recall_iou20']:.4f} | "
+            f"{r['dsc_mean']:.4f} ({r['dsc_median']:.4f}) | "
+            f"{r['lesion_f1_mean']:.4f} ({r['lesion_f1_median']:.4f}) |"
+        )
+
+    blocks.extend(
+        [
+            "",
+            "#### B. Scorer ISLES-2022 (Mã Chính Thức, Quy Tắc Chồng Lấn cc3d)",
+            "| Mô Hình | Ngưỡng | FP/Ca (Tổng FP) ↓ | Ổ < 0.1 mL (Any-Hit) ↑ | Tỷ Lệ Phát Hiện ↑ | Dice (Med) ↑ | Lesion F1 (Med) ↑ |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+
+    for _, r in df_summary.iterrows():
+        micro_n = int(r["micro_total"])
+        off_fp = r.get("official_fp_per_case", r["fp_per_case"])
+        off_tot_fp = int(r.get("official_total_fp", r["total_fp"]))
+        off_f1_m = r.get("official_lesion_f1_mean", r["lesion_f1_mean"])
+        off_f1_med = r.get("official_lesion_f1_median", r["lesion_f1_median"])
+        blocks.append(
+            f"| {_format_sweep_row_label(str(r['model']))} | {r['threshold']:.2f} | "
+            f"{off_fp:.2f} ({off_tot_fp}) | "
+            f"{int(r['micro_touched_any'])}/{micro_n} | "
+            f"{r['micro_any_hit_rate']:.4f} | "
+            f"{r['dsc_mean']:.4f} ({r['dsc_median']:.4f}) | "
+            f"{off_f1_m:.4f} ({off_f1_med:.4f}) |"
+        )
+
+    v3_df = df_summary[df_summary["model"] == "V3_PosNeg"].sort_values("threshold").reset_index(drop=True)
+    v4_df = df_summary[df_summary["model"] == "V4_Component"].sort_values("threshold").reset_index(drop=True)
+
+    ref_row = None
+    if not v3_df.empty:
+        v3_default = v3_df[(v3_df["threshold"] - default_threshold).abs() <= 1e-6]
+        ref_row = v3_default.iloc[0] if not v3_default.empty else v3_df.iloc[0]
+
+    effective_target_fp = (
+        float(target_fp)
+        if target_fp is not None
+        else (float(ref_row["fp_per_case"]) if ref_row is not None else None)
+    )
+
+    if effective_target_fp is not None and not v4_df.empty:
+        blocks.extend(
+            [
+                "",
+                f"### 2. So Sánh Gần Mốc Tham Chiếu `{effective_target_fp:.2f} FP/ca` & Điểm Kẹp",
+                "",
+                "#### A. Theo Cách Chấm Của Nhóm (IoU ≥ 0.2)",
+                "",
+                "| Điểm Vận Hành | Mô Hình | Ngưỡng | FP/Ca thực tế (Tổng FP) | Chênh FP vs Mốc | Ổ < 0.1 mL (IoU>=0.2) | Tỷ Lệ Nhóm | Dice (Med) | Lesion F1 (Med) |",
+                "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+            ]
+        )
+        v4_sorted_fp = v4_df.assign(fp_diff=(v4_df["fp_per_case"] - effective_target_fp).abs())
+        nearest_v4 = v4_sorted_fp.sort_values(["fp_diff", "threshold"]).iloc[0]
+
+        if ref_row is not None:
+            micro_n = int(ref_row["micro_total"])
+            blocks.append(
+                f"| Mốc chuẩn V3 | V3 Pos/Neg | {ref_row['threshold']:.2f} | "
+                f"{ref_row['fp_per_case']:.2f} ({int(ref_row['total_fp'])}) | "
+                f"{ref_row['fp_per_case'] - effective_target_fp:+.2f} | "
+                f"{int(ref_row['micro_detected_iou20'])}/{micro_n} | "
+                f"{ref_row['micro_recall_iou20']:.4f} | "
+                f"{ref_row['dsc_mean']:.4f} ({ref_row['dsc_median']:.4f}) | "
+                f"{ref_row['lesion_f1_mean']:.4f} ({ref_row['lesion_f1_median']:.4f}) |"
+            )
+
+        above = v4_df[v4_df["fp_per_case"] >= effective_target_fp].sort_values("fp_per_case")
+        below = v4_df[v4_df["fp_per_case"] <= effective_target_fp].sort_values("fp_per_case", ascending=False)
+        has_bracket = not above.empty and not below.empty
+        hi_pt = above.iloc[0] if has_bracket else None
+        lo_pt = below.iloc[0] if has_bracket else None
+
+        nearest_label = "V4 gần mốc nhất"
+        if has_bracket and float(hi_pt["threshold"]) != float(lo_pt["threshold"]):
+            if float(nearest_v4["threshold"]) == float(hi_pt["threshold"]):
+                nearest_label = f"V4 gần mốc nhất (Kẹp trên >= {effective_target_fp:.2f})"
+            elif float(nearest_v4["threshold"]) == float(lo_pt["threshold"]):
+                nearest_label = f"V4 gần mốc nhất (Kẹp dưới <= {effective_target_fp:.2f})"
+
+        micro_n4 = int(nearest_v4["micro_total"])
+        blocks.append(
+            f"| {nearest_label} | V4-Fixed | {nearest_v4['threshold']:.2f} | "
+            f"{nearest_v4['fp_per_case']:.2f} ({int(nearest_v4['total_fp'])}) | "
+            f"{nearest_v4['fp_per_case'] - effective_target_fp:+.2f} | "
+            f"{int(nearest_v4['micro_detected_iou20'])}/{micro_n4} | "
+            f"{nearest_v4['micro_recall_iou20']:.4f} | "
+            f"{nearest_v4['dsc_mean']:.4f} ({nearest_v4['dsc_median']:.4f}) | "
+            f"{nearest_v4['lesion_f1_mean']:.4f} ({nearest_v4['lesion_f1_median']:.4f}) |"
+        )
+
+        if has_bracket:
+            if float(hi_pt["threshold"]) != float(lo_pt["threshold"]):
+                for label_b, pt in [
+                    (f"Kẹp trên (>= {effective_target_fp:.2f})", hi_pt),
+                    (f"Kẹp dưới (<= {effective_target_fp:.2f})", lo_pt),
+                ]:
+                    if float(pt["threshold"]) == float(nearest_v4["threshold"]):
+                        continue
+                    blocks.append(
+                        f"| {label_b} | V4-Fixed | {pt['threshold']:.2f} | "
+                        f"{pt['fp_per_case']:.2f} ({int(pt['total_fp'])}) | "
+                        f"{pt['fp_per_case'] - effective_target_fp:+.2f} | "
+                        f"{int(pt['micro_detected_iou20'])}/{int(pt['micro_total'])} | "
+                        f"{pt['micro_recall_iou20']:.4f} | "
+                        f"{pt['dsc_mean']:.4f} ({pt['dsc_median']:.4f}) | "
+                        f"{pt['lesion_f1_mean']:.4f} ({pt['lesion_f1_median']:.4f}) |"
+                    )
+        else:
+            direction = "cao hơn" if v4_df["fp_per_case"].min() > effective_target_fp else "thấp hơn"
+            blocks.append(
+                f"\n> *Lưu ý biên (Cách chấm nhóm):* Toàn bộ các ngưỡng V4 vừa quét đều có FP/ca **{direction}** mốc `{effective_target_fp:.2f}` "
+                f"(dải quan sát của V4: `{v4_df['fp_per_case'].min():.2f}` – `{v4_df['fp_per_case'].max():.2f} FP/ca`)."
+            )
+
+        # Official Scorer Bracketing Section
+        if "official_fp_per_case" in v4_df.columns and ref_row is not None:
+            off_ref_fp = float(ref_row.get("official_fp_per_case", ref_row["fp_per_case"]))
+            blocks.extend(
+                [
+                    "",
+                    f"#### B. Theo Scorer ISLES-2022 (Mã Chính Thức, Mốc V3 = `{off_ref_fp:.2f} FP/ca`)",
+                    "",
+                    "| Điểm Vận Hành | Mô Hình | Ngưỡng | FP/Ca thực tế (Tổng FP) | Chênh FP vs Mốc | Ổ < 0.1 mL (Any-Hit) | Tỷ Lệ Scorer | Dice (Med) | Lesion F1 (Med) |",
+                    "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+                ]
+            )
+            v4_sorted_off_fp = v4_df.assign(off_fp_diff=(v4_df["official_fp_per_case"] - off_ref_fp).abs())
+            nearest_off_v4 = v4_sorted_off_fp.sort_values(["off_fp_diff", "threshold"]).iloc[0]
+
+            blocks.append(
+                f"| Mốc chuẩn V3 (Scorer) | V3 Pos/Neg | {ref_row['threshold']:.2f} | "
+                f"{off_ref_fp:.2f} ({int(ref_row['official_total_fp'])}) | "
+                f"+0.00 | "
+                f"{int(ref_row['micro_touched_any'])}/{int(ref_row['micro_total'])} | "
+                f"{ref_row['micro_any_hit_rate']:.4f} | "
+                f"{ref_row['dsc_mean']:.4f} ({ref_row['dsc_median']:.4f}) | "
+                f"{ref_row['official_lesion_f1_mean']:.4f} ({ref_row['official_lesion_f1_median']:.4f}) |"
+            )
+
+            above_off = v4_df[v4_df["official_fp_per_case"] >= off_ref_fp].sort_values("official_fp_per_case")
+            below_off = v4_df[v4_df["official_fp_per_case"] <= off_ref_fp].sort_values("official_fp_per_case", ascending=False)
+            has_off_bracket = not above_off.empty and not below_off.empty
+            hi_off = above_off.iloc[0] if has_off_bracket else None
+            lo_off = below_off.iloc[0] if has_off_bracket else None
+
+            nearest_off_label = "V4 gần mốc nhất (Scorer)"
+            if has_off_bracket and float(hi_off["threshold"]) != float(lo_off["threshold"]):
+                if float(nearest_off_v4["threshold"]) == float(hi_off["threshold"]):
+                    nearest_off_label = f"V4 gần mốc nhất (Kẹp trên >= {off_ref_fp:.2f})"
+                elif float(nearest_off_v4["threshold"]) == float(lo_off["threshold"]):
+                    nearest_off_label = f"V4 gần mốc nhất (Kẹp dưới <= {off_ref_fp:.2f})"
+
+            blocks.append(
+                f"| {nearest_off_label} | V4-Fixed | {nearest_off_v4['threshold']:.2f} | "
+                f"{nearest_off_v4['official_fp_per_case']:.2f} ({int(nearest_off_v4['official_total_fp'])}) | "
+                f"{nearest_off_v4['official_fp_per_case'] - off_ref_fp:+.2f} | "
+                f"{int(nearest_off_v4['micro_touched_any'])}/{int(nearest_off_v4['micro_total'])} | "
+                f"{nearest_off_v4['micro_any_hit_rate']:.4f} | "
+                f"{nearest_off_v4['dsc_mean']:.4f} ({nearest_off_v4['dsc_median']:.4f}) | "
+                f"{nearest_off_v4['official_lesion_f1_mean']:.4f} ({nearest_off_v4['official_lesion_f1_median']:.4f}) |"
+            )
+
+            if has_off_bracket:
+                if float(hi_off["threshold"]) != float(lo_off["threshold"]):
+                    for label_b, pt in [
+                        (f"Kẹp trên (>= {off_ref_fp:.2f})", hi_off),
+                        (f"Kẹp dưới (<= {off_ref_fp:.2f})", lo_off),
+                    ]:
+                        if float(pt["threshold"]) == float(nearest_off_v4["threshold"]):
+                            continue
+                        blocks.append(
+                            f"| {label_b} | V4-Fixed | {pt['threshold']:.2f} | "
+                            f"{pt['official_fp_per_case']:.2f} ({int(pt['official_total_fp'])}) | "
+                            f"{pt['official_fp_per_case'] - off_ref_fp:+.2f} | "
+                            f"{int(pt['micro_touched_any'])}/{int(pt['micro_total'])} | "
+                            f"{pt['micro_any_hit_rate']:.4f} | "
+                            f"{pt['dsc_mean']:.4f} ({pt['dsc_median']:.4f}) | "
+                            f"{pt['official_lesion_f1_mean']:.4f} ({pt['official_lesion_f1_median']:.4f}) |"
+                        )
+            else:
+                direction_off = "cao hơn" if v4_df["official_fp_per_case"].min() > off_ref_fp else "thấp hơn"
+                blocks.append(
+                    f"\n> *Lưu ý biên (Scorer chính thức):* Toàn bộ các ngưỡng V4 vừa quét đều có FP/ca **{direction_off}** mốc `{off_ref_fp:.2f}` "
+                    f"(dải quan sát của V4: `{v4_df['official_fp_per_case'].min():.2f}` – `{v4_df['official_fp_per_case'].max():.2f} FP/ca`)."
+                )
+
+    blocks.extend(
+        [
+            "",
+            "### 3. Đường Cong Recall–FP Đầy Đủ Theo Ngưỡng",
+            "",
+            "| Ngưỡng | V3 FP/Ca | V3 Recall <0.1 mL (IoU>=0.2 / Any) | V3 Lesion Recall / Prec | V4 FP/Ca | V4 Recall <0.1 mL (IoU>=0.2 / Any) | V4 Lesion Recall / Prec |",
+            "| :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+    thresholds = sorted(df_summary["threshold"].unique().tolist())
+    for thr in thresholds:
+        r3 = v3_df[v3_df["threshold"] == thr]
+        r4 = v4_df[v4_df["threshold"] == thr]
+        s3 = (
+            f"{r3.iloc[0]['fp_per_case']:.2f} | "
+            f"{r3.iloc[0]['micro_recall_iou20']:.4f} / {r3.iloc[0]['micro_any_hit_rate']:.4f} | "
+            f"{r3.iloc[0]['lesion_recall_mean']:.4f} / {r3.iloc[0]['lesion_precision_mean']:.4f}"
+            if not r3.empty
+            else "- | - | -"
+        )
+        s4 = (
+            f"{r4.iloc[0]['fp_per_case']:.2f} | "
+            f"{r4.iloc[0]['micro_recall_iou20']:.4f} / {r4.iloc[0]['micro_any_hit_rate']:.4f} | "
+            f"{r4.iloc[0]['lesion_recall_mean']:.4f} / {r4.iloc[0]['lesion_precision_mean']:.4f}"
+            if not r4.empty
+            else "- | - | -"
+        )
+        blocks.append(f"| {thr:.2f} | {s3} | {s4} |")
+
+    blocks.append("")
+    return "\n".join(blocks)
+
+
 def write_comparison_report(
     md_path: Path,
     df_cases: pd.DataFrame,
@@ -315,6 +744,7 @@ def write_comparison_report(
     ordered_modes: Sequence[str],
     roi_size: Tuple[int, int, int],
     manifest_summary: Optional[Dict[str, Any]] = None,
+    df_sweep_summary: Optional[pd.DataFrame] = None,
 ) -> None:
     """Writes structured Markdown comparison report distinguishing case vs component burden."""
     blocks: List[str] = [
@@ -427,6 +857,16 @@ def write_comparison_report(
             blocks.append(_format_component_bins(sub_k, multi_lesion_only=True))
         blocks.append("")
 
+    if df_sweep_summary is not None and not df_sweep_summary.empty:
+        blocks.append(
+            _format_threshold_sweep_section(
+                df_summary=df_sweep_summary,
+                sweep_pp_mode=args.sweep_postprocess,
+                default_threshold=args.threshold,
+                target_fp=args.sweep_target_fp,
+            )
+        )
+
     md_path.write_text("\n".join(blocks), encoding="utf-8")
     logger.info("Saved paired Fold %d comparison report to: %s", args.fold, md_path)
 
@@ -437,6 +877,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     ordered_modes = order_postprocess_modes(args.postprocess_modes)
+    sweep_thresholds = normalize_sweep_thresholds(args.sweep_thresholds)
 
     cases = parse_isles_dataset(args.data_dir, require_mask=True)
     if args.strict_isles250:
@@ -480,6 +921,7 @@ def main() -> None:
             allow_code_mismatch=args.allow_code_mismatch,
             allow_dry_run=args.allow_dry_run,
             allow_env_mismatch=args.allow_env_mismatch,
+            allow_param_mismatch=args.allow_param_mismatch,
         )
         logger.info(
             "Manifest Parity PASSED | dataset=%s | train=%s | val=%s | code_matched=%s | env_matched=%s | modes=(%s vs %s)",
@@ -497,8 +939,12 @@ def main() -> None:
     resolved = manifest_v3.get("config", {}).get("resolved", {}) if manifest_v3 else {}
     modalities = list(resolved.get("modalities", ["dwi", "adc"]))
     use_edwi = bool(resolved.get("use_edwi", False))
-    roi_tuple = tuple(int(v) for v in resolved.get("roi_size", [96, 96, 64]))
-    roi_size: Tuple[int, int, int] = (roi_tuple[0], roi_tuple[1], roi_tuple[2])
+    if args.sw_roi_size is not None:
+        roi_size: Tuple[int, int, int] = tuple(int(v) for v in args.sw_roi_size)
+    else:
+        roi_tuple = tuple(int(v) for v in resolved.get("val_roi_size", resolved.get("roi_size", [96, 96, 64])))
+        roi_size: Tuple[int, int, int] = (roi_tuple[0], roi_tuple[1], roi_tuple[2])
+    logger.info("Sliding-window inference ROI size: %s | overlap: %.2f", roi_size, args.overlap)
 
     val_transforms = get_val_transforms(
         target_spacing=(1.0, 1.0, 1.0),
@@ -515,6 +961,12 @@ def main() -> None:
 
     case_records: List[Dict[str, Any]] = []
     comp_records: List[Dict[str, Any]] = []
+    sweep_case_records: List[Dict[str, Any]] = []
+    sweep_comp_records: List[Dict[str, Any]] = []
+
+    cache_probs_dir = Path(args.cache_probs_dir) if args.cache_probs_dir else None
+    if cache_probs_dir:
+        cache_probs_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, batch_data in enumerate(val_loader):
         if args.max_cases > 0 and idx >= args.max_cases:
@@ -525,18 +977,27 @@ def main() -> None:
 
         for model_tag, model in models.items():
             t0 = time.time()
-            with torch.no_grad():
-                with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-                    logits = sliding_window_inference(
-                        inputs=images,
-                        roi_size=roi_size,
-                        sw_batch_size=1,
-                        predictor=model,
-                        overlap=args.overlap,
-                        mode="gaussian",
-                    )
-                    probs_np = torch.sigmoid(logits)[0, 0].detach().float().cpu().numpy()
+            cache_file = (cache_probs_dir / f"{model_tag}_{case_id}.npy") if cache_probs_dir else None
+            from_cache = False
+            if cache_file and cache_file.is_file():
+                probs_np = np.load(cache_file).astype(np.float32)
+                from_cache = True
+            else:
+                with torch.no_grad():
+                    with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                        logits = sliding_window_inference(
+                            inputs=images,
+                            roi_size=roi_size,
+                            sw_batch_size=1,
+                            predictor=model,
+                            overlap=args.overlap,
+                            mode="gaussian",
+                        )
+                        probs_np = torch.sigmoid(logits)[0, 0].detach().float().cpu().numpy()
+                if cache_file:
+                    np.save(cache_file, probs_np.astype(np.float16))
 
+            cached_default_eval: Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]] = {}
             pred_raw = (probs_np >= args.threshold).astype(np.uint8)
             for pp_mode in ordered_modes:
                 pred_clean = apply_postprocess_mode(pred_raw, pp_mode, spacing=(1.0, 1.0, 1.0))
@@ -550,19 +1011,43 @@ def main() -> None:
                 )
                 case_records.append(c_row)
                 comp_records.extend(k_rows)
+                cached_default_eval[pp_mode] = (c_row, k_rows)
+
+            for thr in sweep_thresholds:
+                if abs(thr - args.threshold) <= 1e-6 and args.sweep_postprocess in cached_default_eval:
+                    c_base, k_base = cached_default_eval[args.sweep_postprocess]
+                    c_sw, k_sw = _attach_threshold(c_base, k_base, threshold=thr)
+                else:
+                    pred_thr = (probs_np >= thr).astype(np.uint8)
+                    pred_sw = apply_postprocess_mode(
+                        pred_thr, args.sweep_postprocess, spacing=(1.0, 1.0, 1.0)
+                    )
+                    c_base, k_base = evaluate_prediction_volume(
+                        model_tag=model_tag,
+                        pp_mode=args.sweep_postprocess,
+                        case_id=case_id,
+                        pred_clean=pred_sw,
+                        gt_bin=gt_bin,
+                        voxel_spacing=(1.0, 1.0, 1.0),
+                    )
+                    c_sw, k_sw = _attach_threshold(c_base, k_base, threshold=thr)
+                sweep_case_records.append(c_sw)
+                sweep_comp_records.extend(k_sw)
 
             logger.info(
-                "  [Fold %d - %02d/%d | %s] %s finished in %.1fs",
+                "  [Fold %d - %02d/%d | %s] %s %s in %.1fs",
                 args.fold,
                 idx + 1,
                 len(val_loader),
                 case_id,
                 model_tag,
+                "loaded from cache" if from_cache else "finished",
                 time.time() - t0,
             )
 
     df_cases = pd.DataFrame(case_records)
     df_comps = pd.DataFrame(comp_records)
+    df_sweep_summary: Optional[pd.DataFrame] = None
 
     case_csv = output_dir / f"paired_fold{args.fold}_case_metrics.csv"
     comp_csv = output_dir / f"paired_fold{args.fold}_component_metrics.csv"
@@ -570,6 +1055,21 @@ def main() -> None:
 
     df_cases.to_csv(case_csv, index=False)
     df_comps.to_csv(comp_csv, index=False)
+
+    if sweep_thresholds:
+        df_sweep_cases = pd.DataFrame(sweep_case_records)
+        df_sweep_comps = pd.DataFrame(sweep_comp_records)
+        df_sweep_summary = summarize_threshold_sweep(df_sweep_cases, df_sweep_comps)
+        df_sweep_cases.to_csv(
+            output_dir / f"paired_fold{args.fold}_threshold_sweep_cases.csv", index=False
+        )
+        df_sweep_comps.to_csv(
+            output_dir / f"paired_fold{args.fold}_threshold_sweep_components.csv", index=False
+        )
+        df_sweep_summary.to_csv(
+            output_dir / f"paired_fold{args.fold}_threshold_sweep_summary.csv", index=False
+        )
+
     write_comparison_report(
         md_path=md_path,
         df_cases=df_cases,
@@ -579,6 +1079,7 @@ def main() -> None:
         ordered_modes=ordered_modes,
         roi_size=roi_size,
         manifest_summary=manifest_summary,
+        df_sweep_summary=df_sweep_summary,
     )
 
 

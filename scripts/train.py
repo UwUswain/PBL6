@@ -357,10 +357,12 @@ def main() -> None:
     )
 
     # 2. Trích xuất và ép kiểu các tham số dữ liệu (data) từ cfg:
-    # - roi_size: Bắt buộc ép kiểu thành tuple (H, W, D) để truyền vào MONAI transforms
-    # - batch_size: Số lượng patch được đưa vào mỗi bước huấn luyện
+    # - roi_size: Bắt buộc ép kiểu thành tuple (H, W, D) để truyền vào MONAI transforms lúc train
+    # - val_roi_size: Sliding window ROI lúc validation (nếu không khai báo, mặc định bằng roi_size)
+    # - batch_size: Số lượng volume được đưa vào mỗi bước huấn luyện
     # - num_workers: Số tiến trình CPU đọc và tiền xử lý dữ liệu ngầm
     roi_size = tuple(data_cfg["roi_size"])
+    val_roi_size = tuple(data_cfg.get("val_roi_size", roi_size))
     batch_size = int(data_cfg["batch_size"])
     num_workers = (
         args.num_workers
@@ -421,7 +423,7 @@ def main() -> None:
     logger.info("Device: %s | AMP FP16 Enabled: %s", device, use_amp)
     logger.info("Model: %s | Fold: %d/%d", model_name, args.fold, args.n_splits)
     logger.info("Input modalities: [%s] (%d channels)", modalities_str, in_channels)
-    logger.info("Patch dimensions (roi_size): %s | Batch size: %d", roi_size, batch_size)
+    logger.info("Patch dimensions (roi_size): %s | Val ROI size: %s | Batch size: %d", roi_size, val_roi_size, batch_size)
     logger.info("Num workers: %d | Use CacheDataset: %s (cache_rate: %.2f)", num_workers, use_cache, cache_rate)
     logger.info(
         "Max epochs: %d | Learning rate: %.1e | Seed: %s | Strict ISLES-250: %s | Dry-run: %s",
@@ -567,6 +569,7 @@ def main() -> None:
         "neg_ratio": neg_ratio,
         "num_samples_per_volume": num_samples_per_volume,
         "roi_size": list(roi_size),
+        "val_roi_size": list(val_roi_size),
         "batch_size": batch_size,
         "use_cache": use_cache,
         "cache_rate": cache_rate,
@@ -613,6 +616,10 @@ def main() -> None:
             "[DRY-RUN] Executing %d real training batches (forward + backward + optimizer/AMP)...",
             args.dry_run_steps,
         )
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.empty_cache()
+        t0_train = time.time()
         train_loss = train_epoch(
             model=model,
             loader=train_loader,
@@ -623,6 +630,13 @@ def main() -> None:
             use_amp=use_amp,
             max_steps=args.dry_run_steps,
         )
+        t_train = time.time() - t0_train
+        step_sec = t_train / max(args.dry_run_steps, 1)
+        train_peak_mb = (
+            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
         if not math.isfinite(train_loss):
             raise RuntimeError(f"[DRY-RUN] Non-finite training loss observed: {train_loss}")
         scheduler.step()
@@ -630,29 +644,72 @@ def main() -> None:
         if abs(post_sum - init_sum) < 1e-9 and abs(post_l2 - init_l2) < 1e-9:
             raise RuntimeError("[DRY-RUN] Model weights did not change after optimizer step.")
         logger.info(
-            "[DRY-RUN] Train steps + optimizer + scheduler OK | Loss: %.4f | Updated sum=%.6f (delta=%+.6f)",
+            "[DRY-RUN] Train steps + optimizer + scheduler OK | Loss: %.4f | Step: %.2fs/batch | Train Peak VRAM: %.1f MB (%.2f GB)",
             train_loss,
-            post_sum,
-            post_sum - init_sum,
+            step_sec,
+            train_peak_mb,
+            train_peak_mb / 1024.0,
         )
 
         logger.info(
-            "[DRY-RUN] Executing sliding-window validation on %d real volumes...",
+            "[DRY-RUN] Executing sliding-window validation on %d real volumes (val_roi_size: %s)...",
             args.dry_run_val_cases,
+            val_roi_size,
         )
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        t0_val = time.time()
         val_dice, num_cases = validate(
             model=model,
             loader=val_loader,
-            patch_size=roi_size,
+            patch_size=val_roi_size,
             device=device,
             use_amp=use_amp,
             overlap=args.sw_overlap,
             max_cases=args.dry_run_val_cases,
             postprocess_min_size=postprocess_min_size,
         )
+        t_val = time.time() - t0_val
+        val_case_sec = t_val / max(num_cases, 1)
+        val_peak_mb = (
+            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
         if num_cases < 1 or not math.isfinite(val_dice):
             raise RuntimeError(f"[DRY-RUN] Invalid validation result: cases={num_cases}, dice={val_dice}")
-        logger.info("[DRY-RUN] Validation completed (%d cases). Mean Dice: %.4f", num_cases, val_dice)
+        logger.info(
+            "[DRY-RUN] Validation completed (%d cases in %.1fs, %.2fs/case). Mean Dice: %.4f | Val Peak VRAM: %.1f MB (%.2f GB)",
+            num_cases,
+            t_val,
+            val_case_sec,
+            val_dice,
+            val_peak_mb,
+            val_peak_mb / 1024.0,
+        )
+
+        total_gpu_mb = (
+            torch.cuda.get_device_properties(device).total_memory / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
+        overall_peak_mb = max(train_peak_mb, val_peak_mb)
+        headroom_mb = total_gpu_mb - overall_peak_mb
+        batches_per_ep = max(len(train_loader), 1)
+        total_val_cases = len(val_loader.dataset) if hasattr(val_loader, "dataset") else 50
+        num_val_runs = max(100 // max(val_interval, 1), 1)
+        est_100ep_sec = (100 * batches_per_ep * step_sec) + (num_val_runs * total_val_cases * val_case_sec)
+        est_100ep_hours = est_100ep_sec / 3600.0
+
+        logger.info("=" * 75)
+        logger.info("[BENCHMARK SUMMARY] Resource Profile & Scaling Estimate:")
+        logger.info("  Train Patch Size (roi_size): %s | Val Sliding Window: %s", roi_size, val_roi_size)
+        logger.info("  Train Speed: %.2fs / batch (est. train-only 100ep: %.2f h)", step_sec, (100 * batches_per_ep * step_sec) / 3600.0)
+        logger.info("  Val Speed:   %.2fs / case  (est. val-only 100ep [%d runs]: %.2f h)", val_case_sec, num_val_runs, (num_val_runs * total_val_cases * val_case_sec) / 3600.0)
+        logger.info("  Peak VRAM:   Train = %.1f MB (%.2f GB) | Val = %.1f MB (%.2f GB)", train_peak_mb, train_peak_mb / 1024.0, val_peak_mb, val_peak_mb / 1024.0)
+        logger.info("  Headroom:    %.1f MB (%.2f GB free out of %.1f MB total on %s)", headroom_mb, headroom_mb / 1024.0, total_gpu_mb, device)
+        logger.info("  Projected 100-Epoch Duration: %.2f hours", est_100ep_hours)
+        logger.info("=" * 75)
 
         checkpoint_path = run_dir / "dry_run_checkpoint.pth"
         torch.save(
@@ -760,7 +817,7 @@ def main() -> None:
             val_dice, num_cases = validate(
                 model=model,
                 loader=val_loader,
-                patch_size=roi_size,
+                patch_size=val_roi_size,
                 device=device,
                 use_amp=use_amp,
                 overlap=args.sw_overlap,

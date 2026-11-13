@@ -311,13 +311,14 @@ def verify_paired_manifests(
     allow_code_mismatch: bool = False,
     allow_dry_run: bool = False,
     allow_env_mismatch: bool = False,
+    allow_param_mismatch: bool = False,
 ) -> Dict[str, Any]:
     """Verifies that V3 and V4-Fixed checkpoints satisfy full paired experimental parity."""
     expected_val_ids = [c["case_id"] for c in expected_val_cases]
     expected_val_sha256 = hash_id_list(expected_val_ids, sort_ids=False)
 
     _validate_single_manifest_against_val(
-        "V3_PosNeg",
+        "Model_A",
         manifest_v3,
         expected_val_ids,
         expected_val_sha256,
@@ -327,7 +328,7 @@ def verify_paired_manifests(
         strict_isles250,
     )
     _validate_single_manifest_against_val(
-        "V4_Component",
+        "Model_B",
         manifest_v4,
         expected_val_ids,
         expected_val_sha256,
@@ -340,30 +341,35 @@ def verify_paired_manifests(
     s3, s4 = manifest_v3["split"], manifest_v4["split"]
     if s3["train_ids"] != s4["train_ids"] or s3["train_sha256"] != s4["train_sha256"]:
         raise ValueError(
-            f"Paired train split mismatch: V3 train_sha256={s3['train_sha256']} vs V4 train_sha256={s4['train_sha256']}."
+            f"Paired train split mismatch: Model_A train_sha256={s3['train_sha256']} vs Model_B train_sha256={s4['train_sha256']}."
         )
     if s3["val_ids"] != s4["val_ids"] or s3["val_sha256"] != s4["val_sha256"]:
         raise ValueError(
-            f"Paired val split mismatch: V3 val_sha256={s3['val_sha256']} vs V4 val_sha256={s4['val_sha256']}."
+            f"Paired val split mismatch: Model_A val_sha256={s3['val_sha256']} vs Model_B val_sha256={s4['val_sha256']}."
         )
     if manifest_v3["dataset"]["dataset_ids_sha256"] != manifest_v4["dataset"]["dataset_ids_sha256"]:
-        raise ValueError("Paired dataset_ids_sha256 mismatch between V3 and V4 checkpoints.")
+        raise ValueError("Paired dataset_ids_sha256 mismatch between checkpoints.")
 
     c3 = manifest_v3.get("config", {}).get("resolved", {})
     c4 = manifest_v4.get("config", {}).get("resolved", {})
 
     mode_v3 = c3.get("sampling_mode")
     mode_v4 = c4.get("sampling_mode")
+    warnings: List[str] = []
     if mode_v3 != "standard" or mode_v4 != "component_aware":
-        raise ValueError(
-            f"Sampling mode pairing error: expected V3='standard' & V4='component_aware', "
-            f"got V3='{mode_v3}' & V4='{mode_v4}'."
+        if not allow_param_mismatch:
+            raise ValueError(
+                f"Sampling mode pairing error: expected Model_A='standard' & Model_B='component_aware', "
+                f"got Model_A='{mode_v3}' & Model_B='{mode_v4}'. Use --allow-param-mismatch for custom variant comparisons."
+            )
+        warnings.append(
+            f"Custom variant comparison: sampling_modes=(Model_A='{mode_v3}', Model_B='{mode_v4}')."
         )
 
     dry_v3 = bool(c3.get("is_dry_run", False))
     dry_v4 = bool(c4.get("is_dry_run", False))
     if dry_v3 != dry_v4:
-        raise ValueError(f"Cannot mix dry-run and full-run checkpoints (V3 dry={dry_v3}, V4 dry={dry_v4}).")
+        raise ValueError(f"Cannot mix dry-run and full-run checkpoints (Model_A dry={dry_v3}, Model_B dry={dry_v4}).")
     if (dry_v3 or dry_v4) and not allow_dry_run:
         raise ValueError(
             "Checkpoint(s) come from --dry-run smoke training. Pass --allow-dry-run only for smoke evaluation."
@@ -374,9 +380,11 @@ def verify_paired_manifests(
         v3_val = _normalize_parity_value(c3.get(key))
         v4_val = _normalize_parity_value(c4.get(key))
         if v3_val != v4_val:
-            mismatched_params.append(f"{key} (V3={v3_val!r} vs V4={v4_val!r})")
+            mismatched_params.append(f"{key} (Model_A={v3_val!r} vs Model_B={v4_val!r})")
     if mismatched_params:
-        raise ValueError("Paired hyperparameter parity violation: " + "; ".join(mismatched_params))
+        if not allow_param_mismatch:
+            raise ValueError("Paired hyperparameter parity violation: " + "; ".join(mismatched_params))
+        warnings.append("Hyperparameter differences bypassed via --allow-param-mismatch: " + "; ".join(mismatched_params))
 
     cv3 = manifest_v3.get("code_version", {})
     cv4 = manifest_v4.get("code_version", {})
