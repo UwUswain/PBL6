@@ -48,7 +48,7 @@ BRANCH_NAME = "long_exp"
 FOLD = 0
 
 # SHA mới nhất đã bao gồm công cụ chẩn đoán và sửa lỗi eval mismatch
-COMMIT_SHA = "9d96c0ad33c8bfb38da055410b1286a9811a7db4"
+COMMIT_SHA = "fe5dc00ee113b7885b46c576a3af863b89addf6c"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
