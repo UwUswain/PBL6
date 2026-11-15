@@ -77,16 +77,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="experiments/diagnostics", help="Output directory for reports.")
     parser.add_argument("--device", type=str, default=None, help="Device to run inference (e.g. cuda or cpu).")
     parser.add_argument("--skip-fp32-comparison", action="store_true", help="Skip FP32 comparison pass (runs AMP only).")
+    parser.add_argument("--expected-cuda", type=str, default=None, help="Expected CUDA version (e.g. 13.0). Mismatch causes fatal error.")
     return parser.parse_args()
 
 
-def audit_environment(device: torch.device) -> Dict[str, Any]:
+def audit_environment(device: torch.device, expected_cuda: Optional[str] = None) -> Dict[str, Any]:
     """Audits local Python, PyTorch, and CUDA runtime environment."""
+    torch_cuda_version = torch.version.cuda if hasattr(torch.version, "cuda") else None
     env_info = {
         "python_version": sys.version.split()[0],
         "torch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
-        "torch_cuda_version": torch.version.cuda if hasattr(torch.version, "cuda") else None,
+        "torch_cuda_version": torch_cuda_version,
         "device_type": device.type,
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
         "total_memory_mb": (
@@ -98,6 +100,12 @@ def audit_environment(device: torch.device) -> Dict[str, Any]:
     logger.info("Environment Audit: Python %s | PyTorch %s (CUDA: %s) | Device: %s (%s, %.1f MB VRAM)",
                 env_info["python_version"], env_info["torch_version"], env_info["torch_cuda_version"],
                 env_info["device_type"], env_info["device_name"], env_info["total_memory_mb"])
+
+    if expected_cuda is not None and torch_cuda_version != expected_cuda:
+        raise RuntimeError(
+            f"CUDA version mismatch! Expected {expected_cuda}, got {torch_cuda_version}"
+        )
+
     return env_info
 
 
@@ -160,6 +168,9 @@ def verify_checkpoint_integrity(
     if val_score is None:
         val_score = ckpt_data.get("val_dice")
 
+    cfg_info = manifest.get("config", {})
+    code_info = manifest.get("code_version", {})
+
     manifest_meta = {
         "epoch": actual_epoch,
         "stated_score": val_score,
@@ -176,7 +187,10 @@ def verify_checkpoint_integrity(
         "total_cases": dataset_info.get("total_cases"),
         "train_ids": split_info.get("train_ids", []),
         "val_ids": split_info.get("val_ids", []),
-        "git_commit": manifest.get("code_version", {}).get("git_commit"),
+        "git_commit": code_info.get("git_commit"),
+        "config_file": cfg_info.get("config_file"),
+        "config_sha256": cfg_info.get("config_sha256"),
+        "run_created_at": manifest.get("created_at"),
     }
 
     logger.info("  -> Manifest verified: Epoch=%s | Stored Score=%s | Loss=%s | SW-ROI=%s | Val SHA=%s",
@@ -194,46 +208,80 @@ def cross_check_split_with_dataset(
     meta_best: Dict[str, Any],
     meta_last: Dict[str, Any],
 ) -> None:
-    """Cross-checks parser-generated cases and splits with both checkpoint manifests."""
+    """Cross-checks parser-generated cases and splits with both checkpoint manifests,
+    and strictly validates code/config/run parity between best and last checkpoints."""
     logger.info("Cross-checking dataset and split manifests with filesystem parser...")
     if len(all_cases) != 250:
         raise ValueError(f"Expected 250 cases in dataset, found {len(all_cases)}")
 
     train_cases, val_cases = splits[fold]
-    actual_train_sha256 = compute_split_fingerprint(train_cases)
-    actual_val_sha256 = compute_split_fingerprint(val_cases)
+    fingerprint = compute_split_fingerprint(train_cases, val_cases)
+    actual_train_sha256 = fingerprint["train_sha256"]
+    actual_val_sha256 = fingerprint["val_sha256"]
 
     # Check match with Best Checkpoint
-    if meta_best["val_sha256"] != actual_val_sha256:
+    if meta_best.get("val_sha256") != actual_val_sha256:
         raise ValueError(
-            f"Val SHA256 mismatch in Best Checkpoint! Manifest={meta_best['val_sha256']}, Parser={actual_val_sha256}"
+            f"Val SHA256 mismatch in Best Checkpoint! Manifest={meta_best.get('val_sha256')}, Parser={actual_val_sha256}"
         )
-    if meta_best["train_sha256"] != actual_train_sha256:
+    if meta_best.get("train_sha256") != actual_train_sha256:
         raise ValueError(
-            f"Train SHA256 mismatch in Best Checkpoint! Manifest={meta_best['train_sha256']}, Parser={actual_train_sha256}"
+            f"Train SHA256 mismatch in Best Checkpoint! Manifest={meta_best.get('train_sha256')}, Parser={actual_train_sha256}"
         )
 
     # Check match with Last Checkpoint
-    if meta_last["val_sha256"] != actual_val_sha256:
+    if meta_last.get("val_sha256") != actual_val_sha256:
         raise ValueError(
-            f"Val SHA256 mismatch in Last Checkpoint! Manifest={meta_last['val_sha256']}, Parser={actual_val_sha256}"
+            f"Val SHA256 mismatch in Last Checkpoint! Manifest={meta_last.get('val_sha256')}, Parser={actual_val_sha256}"
         )
-    if meta_last["train_sha256"] != actual_train_sha256:
+    if meta_last.get("train_sha256") != actual_train_sha256:
         raise ValueError(
-            f"Train SHA256 mismatch in Last Checkpoint! Manifest={meta_last['train_sha256']}, Parser={actual_train_sha256}"
+            f"Train SHA256 mismatch in Last Checkpoint! Manifest={meta_last.get('train_sha256')}, Parser={actual_train_sha256}"
+        )
+
+    # Check run identity & config/code parity between Best and Last Checkpoints
+    b_created = meta_best.get("run_created_at")
+    l_created = meta_last.get("run_created_at")
+    if b_created and l_created and b_created != l_created:
+        raise ValueError(
+            f"Run created_at mismatch between Best ({b_created}) and Last ({l_created})! Checkpoints are from different runs."
+        )
+
+    b_commit = meta_best.get("git_commit")
+    l_commit = meta_last.get("git_commit")
+    if b_commit and l_commit and b_commit != l_commit:
+        raise ValueError(
+            f"Git commit mismatch between Best ({b_commit}) and Last ({l_commit})!"
+        )
+
+    b_cfg_sha = meta_best.get("config_sha256")
+    l_cfg_sha = meta_last.get("config_sha256")
+    if b_cfg_sha and l_cfg_sha and b_cfg_sha != l_cfg_sha:
+        raise ValueError(
+            f"Config SHA256 mismatch between Best ({b_cfg_sha}) and Last ({l_cfg_sha})!"
         )
 
     # Check both checkpoints come from the exact same split and configuration
-    if meta_best["train_sha256"] != meta_last["train_sha256"]:
+    if meta_best.get("train_sha256") != meta_last.get("train_sha256"):
         raise ValueError("Checkpoints come from DIFFERENT train splits!")
-    if meta_best["val_sha256"] != meta_last["val_sha256"]:
+    if meta_best.get("val_sha256") != meta_last.get("val_sha256"):
         raise ValueError("Checkpoints come from DIFFERENT validation splits!")
-    if meta_best["roi_size"] != meta_last["roi_size"]:
+    if meta_best.get("roi_size") != meta_last.get("roi_size"):
         raise ValueError("Checkpoints have mismatched training ROI sizes!")
+    if meta_best.get("val_roi_size") != meta_last.get("val_roi_size"):
+        raise ValueError("Checkpoints have mismatched validation ROI sizes!")
+    if meta_best.get("model_name") != meta_last.get("model_name"):
+        raise ValueError("Checkpoints have mismatched model architectures!")
+    if meta_best.get("loss_type") != meta_last.get("loss_type"):
+        raise ValueError("Checkpoints have mismatched loss functions!")
+    if meta_best.get("deep_supervision") != meta_last.get("deep_supervision"):
+        raise ValueError("Checkpoints have mismatched deep supervision settings!")
 
     logger.info("  -> Dataset & Split Parity Verified: 250 total cases (Train: %d, Val: %d)",
                 len(train_cases), len(val_cases))
     logger.info("  -> Train SHA256: %s | Val SHA256: %s", actual_train_sha256, actual_val_sha256)
+    logger.info("  -> Run Identity Verified: Run created_at=%s | Git commit=%s | Config SHA=%s",
+                b_created, str(b_commit)[:12], str(b_cfg_sha)[:12])
 
 
 def audit_weights(
@@ -681,7 +729,7 @@ def main() -> None:
     logger.info("=" * 76)
 
     # 1. Audit Environment & Verify Checkpoint Integrity
-    env_info = audit_environment(device)
+    env_info = audit_environment(device, expected_cuda=args.expected_cuda)
     ckpt_b, meta_b = verify_checkpoint_integrity(ckpt_best_path, args.expected_best_epoch, args.fold)
     ckpt_l, meta_l = verify_checkpoint_integrity(ckpt_last_path, args.expected_last_epoch, args.fold)
 

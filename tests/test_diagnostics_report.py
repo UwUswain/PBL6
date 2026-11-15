@@ -27,8 +27,10 @@ from scripts.diagnose_collapse import (
     build_markdown_report,
     compare_amp_vs_fp32,
     compute_case_diagnostics,
+    cross_check_split_with_dataset,
     fmt,
 )
+from src.dataset.parser import compute_split_fingerprint
 
 
 class TestDiagnosticsReport(unittest.TestCase):
@@ -267,6 +269,156 @@ class TestDiagnosticsReport(unittest.TestCase):
         self.assertIsNone(diag["fg_logit_max"])
         self.assertIsNotNone(diag["bg_prob_mean"])
 
+    def _create_mock_dataset_and_splits(self):
+        """Generates synthetic 250 cases and fold 0 split (200 train / 50 val)."""
+        cases = [{"case_id": f"sub-strokecase{i:04d}"} for i in range(1, 251)]
+        train_cases = cases[:200]
+        val_cases = cases[200:]
+        splits = [(train_cases, val_cases)]
+        return cases, splits
+
+    def test_cross_check_split_success(self):
+        """Verifies cross_check_split_with_dataset passes when split hashes and run identity match."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        train_cases, val_cases = splits[0]
+        fp = compute_split_fingerprint(train_cases, val_cases)
+
+        meta_best = {
+            "epoch": 70,
+            "train_sha256": fp["train_sha256"],
+            "val_sha256": fp["val_sha256"],
+            "roi_size": [96, 96, 80],
+            "val_roi_size": [96, 96, 64],
+            "model_name": "dual_segresnet",
+            "loss_type": "dice_focal",
+            "deep_supervision": True,
+            "run_created_at": "2026-11-13T09:21:13.045948+00:00",
+            "git_commit": "ffe09856961b92360009b9b526da0b6f2dd54ada",
+            "config_sha256": "950df13d331d02988595df2f81938780f7b192d5f90f6fc62006911b0e044593",
+        }
+        meta_last = dict(meta_best)
+        meta_last["epoch"] = 150
+
+        # Should pass with no exception
+        cross_check_split_with_dataset(cases, splits, 0, meta_best, meta_last)
+
+    def test_cross_check_split_mismatched_train_hash(self):
+        """Verifies that mismatched train split SHA256 raises ValueError."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        train_cases, val_cases = splits[0]
+        fp = compute_split_fingerprint(train_cases, val_cases)
+
+        meta_best = {
+            "epoch": 70,
+            "train_sha256": "tampered_train_hash",
+            "val_sha256": fp["val_sha256"],
+            "roi_size": [96, 96, 80],
+            "val_roi_size": [96, 96, 64],
+            "model_name": "dual_segresnet",
+            "loss_type": "dice_focal",
+            "deep_supervision": True,
+            "run_created_at": "2026-11-13T09:21:13.045948+00:00",
+            "git_commit": "ffe09856961b92360009b9b526da0b6f2dd54ada",
+            "config_sha256": "950df13d331d02988595df2f81938780f7b192d5f90f6fc62006911b0e044593",
+        }
+        meta_last = dict(meta_best)
+        meta_last["train_sha256"] = fp["train_sha256"]
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_check_split_with_dataset(cases, splits, 0, meta_best, meta_last)
+        self.assertIn("Train SHA256 mismatch", str(ctx.exception))
+
+    def test_cross_check_split_mismatched_val_hash(self):
+        """Verifies that mismatched validation split SHA256 raises ValueError."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        train_cases, val_cases = splits[0]
+        fp = compute_split_fingerprint(train_cases, val_cases)
+
+        meta_best = {
+            "epoch": 70,
+            "train_sha256": fp["train_sha256"],
+            "val_sha256": fp["val_sha256"],
+            "roi_size": [96, 96, 80],
+            "val_roi_size": [96, 96, 64],
+            "model_name": "dual_segresnet",
+            "loss_type": "dice_focal",
+            "deep_supervision": True,
+            "run_created_at": "2026-11-13T09:21:13.045948+00:00",
+            "git_commit": "ffe09856961b92360009b9b526da0b6f2dd54ada",
+            "config_sha256": "950df13d331d02988595df2f81938780f7b192d5f90f6fc62006911b0e044593",
+        }
+        meta_last = dict(meta_best)
+        meta_last["val_sha256"] = "tampered_val_hash"
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_check_split_with_dataset(cases, splits, 0, meta_best, meta_last)
+        self.assertIn("Val SHA256 mismatch", str(ctx.exception))
+
+    def test_cross_check_split_mismatched_run_identity(self):
+        """Verifies that checkpoints from different runs (mismatched created_at) are blocked."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        train_cases, val_cases = splits[0]
+        fp = compute_split_fingerprint(train_cases, val_cases)
+
+        meta_best = {
+            "epoch": 70,
+            "train_sha256": fp["train_sha256"],
+            "val_sha256": fp["val_sha256"],
+            "roi_size": [96, 96, 80],
+            "val_roi_size": [96, 96, 64],
+            "model_name": "dual_segresnet",
+            "loss_type": "dice_focal",
+            "deep_supervision": True,
+            "run_created_at": "2026-11-13T09:21:13.045948+00:00",
+            "git_commit": "ffe09856961b92360009b9b526da0b6f2dd54ada",
+            "config_sha256": "950df13d331d02988595df2f81938780f7b192d5f90f6fc62006911b0e044593",
+        }
+        meta_last = dict(meta_best)
+        meta_last["run_created_at"] = "2026-11-13T10:00:00.000000+00:00"  # Different run
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_check_split_with_dataset(cases, splits, 0, meta_best, meta_last)
+        self.assertIn("Run created_at mismatch", str(ctx.exception))
+
+    def test_cross_check_split_mismatched_config_sha256(self):
+        """Verifies that checkpoints with different config hashes are blocked."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        train_cases, val_cases = splits[0]
+        fp = compute_split_fingerprint(train_cases, val_cases)
+
+        meta_best = {
+            "epoch": 70,
+            "train_sha256": fp["train_sha256"],
+            "val_sha256": fp["val_sha256"],
+            "roi_size": [96, 96, 80],
+            "val_roi_size": [96, 96, 64],
+            "model_name": "dual_segresnet",
+            "loss_type": "dice_focal",
+            "deep_supervision": True,
+            "run_created_at": "2026-11-13T09:21:13.045948+00:00",
+            "git_commit": "ffe09856961b92360009b9b526da0b6f2dd54ada",
+            "config_sha256": "950df13d331d02988595df2f81938780f7b192d5f90f6fc62006911b0e044593",
+        }
+        meta_last = dict(meta_best)
+        meta_last["config_sha256"] = "different_config_sha256"
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_check_split_with_dataset(cases, splits, 0, meta_best, meta_last)
+        self.assertIn("Config SHA256 mismatch", str(ctx.exception))
+
+    def test_cross_check_split_invalid_case_count(self):
+        """Verifies that dataset with count != 250 is blocked."""
+        cases, splits = self._create_mock_dataset_and_splits()
+        short_cases = cases[:240]
+
+        meta_best = {"train_sha256": "a", "val_sha256": "b"}
+        meta_last = {"train_sha256": "a", "val_sha256": "b"}
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_check_split_with_dataset(short_cases, splits, 0, meta_best, meta_last)
+        self.assertIn("Expected 250 cases", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+
