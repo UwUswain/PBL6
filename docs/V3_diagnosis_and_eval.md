@@ -1,8 +1,10 @@
-# HƯỚNG DẪN CHẨN ĐOÁN SUY GIẢM MÔ HÌNH V3 VÀ ĐÁNH GIÁ ĐỐI ĐẦU TRÊN KAGGLE
+# HƯỚNG DẪN CHẨN ĐOÁN SUY GIẢM MÔ HÌNH V3 TRÊN KAGGLE (PHIÊN BẢN v2.1)
 
 > **Dành cho Long:** Copy toàn bộ cell code bên dưới dán đè vào Kaggle Notebook `ISLES-2022 DATASET ANALYSIS`.
-> - Chọn `RUN_MODE = "diagnose"`: Chạy chẩn đoán đối chứng Epoch 70 vs Epoch 150, kiểm tra số học NaN/Inf, đối chiếu độ chính xác AMP FP16 vs FP32, quét ngưỡng 0.05–0.50, và đo độ méo aux target downsampling của Bài 22 (khoảng 3–4 phút).
-> - Chọn `RUN_MODE = "eval_v3_old_vs_new"`: Chấm điểm đối đầu chuẩn 4 metrics ISLES-2022 giữa V3 cũ (100ep, Dice 0.6779) và V3 mới (Ep 70, Dice 0.6816) trên 50 ca Fold 0 (khoảng 12 phút).
+> - Chạy chẩn đoán đối chứng Epoch 70 vs Epoch 150.
+> - Kiểm tra số học NaN/Inf, đối chiếu độ chính xác AMP FP16 vs FP32.
+> - Quét ngưỡng 0.05–0.50 và đo độ méo aux target downsampling của Bài 22 (khoảng 3–4 phút).
+> - Mỗi lượt chạy sẽ tự động lưu vào thư mục riêng có timestamp để không ghi đè artifact.
 
 ---
 
@@ -28,22 +30,18 @@ import subprocess
 import sys
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 # ============================================================================
-# 1. CẤU HÌNH CHẾ ĐỘ CHẠY & COMMIT SHA XÁC THỰC
+# 1. CẤU HÌNH PHIÊN CHẨN ĐOÁN & COMMIT SHA
 # ============================================================================
-# Chế độ chạy:
-# - "diagnose": Chẩn đoán Ep 70 vs Ep 150 (NaN/Inf, AMP vs FP32, threshold sweep, aux downsampling) (~3-4 phút)
-# - "eval_v3_old_vs_new": Đánh giá đối đầu V3 cũ (100ep) vs V3 mới (Ep 70) trên 50 ca Fold 0 (~12 phút)
-RUN_MODE = "diagnose"  # "diagnose" | "eval_v3_old_vs_new"
-
 REPO_URL = "https://github.com/UwUswain/PBL6.git"
 BRANCH_NAME = "long_exp"
 FOLD = 0
 
-# SHA hợp lệ trên origin/long_exp (đã bao gồm diagnose_collapse v2.0 và AMP/FP32 parity)
-COMMIT_SHA = "edd40c02111d431be7a13d3326ce5a52e9dafdc2"
+# SHA hợp lệ trên origin/long_exp (đã bao gồm diagnose_collapse v2.1 và unit test CPU)
+COMMIT_SHA = "b2a0d05978e1ba536f8d1ac06823d22fb2608d40"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
@@ -61,10 +59,14 @@ PINNED_ENV = {
     },
 }
 
-print(f"Target RUN_MODE: {RUN_MODE} | FOLD: {FOLD} | COMMIT: {COMMIT_SHA}")
+# Đường dẫn tường minh đến Checkpoint Best (Epoch 70) và Last (Epoch 150)
+CKPT_BEST_PATH = Path("/kaggle/input/isles-2022-dataset-analysis/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807/best_metric_model.pth")
+CKPT_LAST_PATH = Path("/kaggle/input/isles-2022-dataset-analysis/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807/last_checkpoint.pth")
+
+print(f"Target FOLD: {FOLD} | COMMIT: {COMMIT_SHA}")
 
 # ============================================================================
-# 2. KIỂM TRA MÔI TRƯỜNG & GIT CHECKOUT
+# 2. KIỂM TRA MÔI TRƯỜNG NGHIÊM NGẶT & GIT CHECKOUT
 # ============================================================================
 def installed_ver(dist_name: str):
     try:
@@ -72,26 +74,40 @@ def installed_ver(dist_name: str):
     except importlib.metadata.PackageNotFoundError:
         return None
 
-print("\n>>> [1/5] Auditing GPU and Environment Constraints...")
+print("\n>>> [1/5] Auditing GPU and Environment Constraints against PINNED_ENV...")
 subprocess.run(["nvidia-smi"], check=False)
 
 import torch
-assert torch.cuda.is_available(), "CUDA GPU is required for Kaggle diagnostic/evaluation run!"
+assert torch.cuda.is_available(), "CUDA GPU is required for Kaggle diagnostic run!"
 gpu_name = torch.cuda.get_device_name(0)
 gpu_mem_mb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
-print(f"GPU: {gpu_name} ({gpu_mem_mb:.1f} MB VRAM) | PyTorch: {torch.__version__}")
+torch_cuda_actual = getattr(torch.version, "cuda", None)
+print(f"GPU: {gpu_name} ({gpu_mem_mb:.1f} MB VRAM) | PyTorch: {torch.__version__} (CUDA: {torch_cuda_actual})")
 
 py_actual = f"{sys.version_info.major}.{sys.version_info.minor}"
 if py_actual != PINNED_ENV["python_major_minor"]:
-    print(f"Notice: Python version is {py_actual} (pinned target: {PINNED_ENV['python_major_minor']})")
+    raise RuntimeError(
+        f"Python version mismatch! Expected {PINNED_ENV['python_major_minor']}, got {py_actual}"
+    )
+
+if PINNED_ENV.get("torch_cuda") and torch_cuda_actual != PINNED_ENV["torch_cuda"]:
+    print(f"Notice: torch.version.cuda is {torch_cuda_actual} (pinned: {PINNED_ENV['torch_cuda']})")
 
 for pkg_name, exp_ver in PINNED_ENV["packages"].items():
     cur_ver = installed_ver(pkg_name)
     if cur_ver is None:
-        print(f"Installing missing package: {pkg_name}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg_name])
-    else:
-        print(f"  Package {pkg_name:24s}: {cur_ver} (expected: {exp_ver or 'any'})")
+        if exp_ver is None:
+            raise RuntimeError(f"Required package {pkg_name} is missing!")
+        print(f"Package {pkg_name} is missing. Installing exact pinned version {exp_ver}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", f"{pkg_name}=={exp_ver}"])
+        cur_ver = installed_ver(pkg_name)
+        if cur_ver != exp_ver:
+            raise RuntimeError(f"Failed to install {pkg_name}=={exp_ver}, got {cur_ver}")
+    elif exp_ver is not None and cur_ver != exp_ver:
+        raise RuntimeError(
+            f"Package version mismatch for {pkg_name}: expected {exp_ver}, found {cur_ver}!"
+        )
+    print(f"  Verified {pkg_name:24s}: {cur_ver}")
 
 repo_dir = Path("/kaggle/working/PBL6")
 if not repo_dir.exists():
@@ -146,22 +162,26 @@ DATA_DIR = str(raw_data_dir)
 # ============================================================================
 # 4. CHỌN CHECKPOINT TƯỜNG MINH VÀ XÁC MINH MANIFEST / EPOCH 70-150
 # ============================================================================
-print("\n>>> [3/5] Explicit Checkpoint Discovery & Header Verification...")
+print("\n>>> [3/5] Explicit Checkpoint Discovery & Verification...")
 
-def resolve_explicit_checkpoint(expected_epoch: int, filename: str) -> Path:
-    # 1. Kiểm tra các đường dẫn tường minh
-    explicit_candidates = [
-        Path(f"/kaggle/input/isles-2022-dataset-analysis/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807/{filename}"),
+def resolve_checkpoint(preferred_path: Path, expected_epoch: int, filename: str) -> Path:
+    # 1. Kiểm tra preferred path tường minh
+    if preferred_path.exists():
+        ckpt = torch.load(preferred_path, map_location="cpu")
+        if ckpt.get("epoch") == expected_epoch:
+            return preferred_path
+
+    # 2. Tìm kiếm trong các thư mục input / working nếu user đổi tên dataset
+    fallback_candidates = [
         Path(f"/kaggle/input/isles-2022-v3-150ep-fold0/{filename}"),
         Path(f"/kaggle/working/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807/{filename}"),
     ]
-    for p in explicit_candidates:
+    for p in fallback_candidates:
         if p.exists():
             ckpt = torch.load(p, map_location="cpu")
             if ckpt.get("epoch") == expected_epoch:
                 return p
-                
-    # 2. Tìm kiếm trong các thư mục input / working nếu đường dẫn đổi tên
+
     for root in [Path("/kaggle/input"), Path("/kaggle/working")]:
         for p in root.rglob("*.pth"):
             if filename in p.name:
@@ -173,34 +193,21 @@ def resolve_explicit_checkpoint(expected_epoch: int, filename: str) -> Path:
                     pass
     return None
 
-ckpt_best = resolve_explicit_checkpoint(expected_epoch=70, filename="best_metric_model.pth")
-ckpt_last = resolve_explicit_checkpoint(expected_epoch=150, filename="last_checkpoint.pth")
-
-# Tìm V3 cũ (100ep, Fold 0, Dice 0.6779)
-ckpt_v3_old = None
-old_candidates = [
-    Path("/kaggle/input/isles-2022-v3-v4-fold0/v3_best.pth"),
-    Path("/kaggle/input/datasets/ivesunderthiscobal/isles-2022-v3-v4-fold0/v3_best.pth"),
-] + list(Path("/kaggle/input").rglob("v3_best.pth"))
-for p in old_candidates:
-    if p.exists():
-        ckpt_v3_old = p
-        break
+ckpt_best = resolve_checkpoint(CKPT_BEST_PATH, expected_epoch=70, filename="best_metric_model.pth")
+ckpt_last = resolve_checkpoint(CKPT_LAST_PATH, expected_epoch=150, filename="last_checkpoint.pth")
 
 print(f"Checkpoint Best (Epoch 70)  : {ckpt_best}")
 print(f"Checkpoint Last (Epoch 150) : {ckpt_last}")
-print(f"Checkpoint V3 Cũ (100ep)    : {ckpt_v3_old}")
 
-if RUN_MODE == "diagnose":
-    if ckpt_best is None or ckpt_last is None:
-        raise FileNotFoundError(
-            "CHƯA TÌM THẤY CHECKPOINT 150-EPOCH HỢP LỆ!\n"
-            "Hãy nhìn sang cột phải của Kaggle -> Bấm '+ Add Input' -> Chọn tab 'Your Work' ->\n"
-            "Chọn notebook 'ISLES-2022 DATASET ANALYSIS' (Version 23 vừa chạy xong) để mount output vào /kaggle/input/."
-        )
+if ckpt_best is None or ckpt_last is None:
+    raise FileNotFoundError(
+        "CHƯA TÌM THẤY CHECKPOINT 150-EPOCH HỢP LỆ (Epoch 70 / Epoch 150)!\n"
+        "Hãy nhìn sang cột phải của Kaggle -> Bấm '+ Add Input' -> Chọn tab 'Your Work' ->\n"
+        "Chọn notebook 'ISLES-2022 DATASET ANALYSIS' (Version 23 vừa chạy xong) để mount output vào /kaggle/input/."
+    )
 
 # ============================================================================
-# 5. THỰC THI CHẾ ĐỘ CHẨN ĐOÁN HOẶC ĐÁNH GIÁ ĐỐI ĐẦU
+# 5. THỰC THI CHẨN ĐOÁN VÀ LƯU VÀO THƯ MỤC RIÊNG CÓ TIMESTAMP
 # ============================================================================
 def run_streamed(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -211,58 +218,32 @@ def run_streamed(cmd):
     if rc != 0:
         raise RuntimeError(f"Command failed with exit code {rc}")
 
-if RUN_MODE == "diagnose":
-    diag_dir = Path("/kaggle/working/diagnostics_out")
-    diag_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("\n>>> [4/5] Running Model Collapse Diagnostic Engine (v2.0)...")
-    print("Features: Manifest Check + NaN/Inf Pre-threshold Gating + AMP FP16 vs FP32 Parity + Aux Loss Distortion")
-    run_streamed([
-        sys.executable, "-u", "scripts/diagnose_collapse.py",
-        "--ckpt-best", str(ckpt_best),
-        "--ckpt-last", str(ckpt_last),
-        "--expected-best-epoch", "70",
-        "--expected-last-epoch", "150",
-        "--data-dir", DATA_DIR,
-        "--fold", str(FOLD),
-        "--sw-roi-size", "96", "96", "64",
-        "--overlap", "0.25",
-        "--num-cases", "5",
-        "--output-dir", str(diag_dir),
-    ])
-    
-    report_file = diag_dir / "collapse_diagnosis_report.md"
-    if report_file.exists():
-        print("\n" + "=" * 76)
-        print("BÁO CÁO ĐO ĐẠC THỰC NGHIỆM CHI TIẾT (OBJECTIVE DATA ONLY):")
-        print("=" * 76)
-        print(report_file.read_text(encoding="utf-8"))
+run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+diag_dir = Path(f"/kaggle/working/diagnostics_run_{run_timestamp}")
+diag_dir.mkdir(parents=True, exist_ok=True)
 
-elif RUN_MODE == "eval_v3_old_vs_new":
-    assert ckpt_v3_old is not None, "Chưa tìm thấy v3_best.pth (V3 cũ 100ep)!"
-    assert ckpt_best is not None, "Chưa tìm thấy best_metric_model.pth (V3 mới Ep 70)!"
-    
-    eval_dir = Path("/kaggle/working/eval_v3_old_vs_new_fold0")
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("\n>>> [4/5] Running Paired Evaluation: V3 Cũ (100ep) vs V3 Mới (150ep, Ep 70)...")
-    run_streamed([
-        sys.executable, "-u", "scripts/evaluate_paired_fold.py",
-        "--ckpt-v3", str(ckpt_v3_old),
-        "--ckpt-v4", str(ckpt_best),
-        "--data-dir", DATA_DIR,
-        "--fold", str(FOLD),
-        "--strict-isles250",
-        "--sw-roi-size", "96", "96", "64",
-        "--allow-param-mismatch",
-        "--postprocess-modes", "raw", "0.008ml",
-        "--output-dir", str(eval_dir),
-    ])
-    
-    report_file = eval_dir / f"paired_fold{FOLD}_comparison_report.md"
-    if report_file.exists():
-        print("\n" + "=" * 76)
-        print("BÁO CÁO ĐỐI ĐẦU 4 METRICS ISLES-2022:")
-        print("=" * 76)
-        print(report_file.read_text(encoding="utf-8"))
+print(f"\n>>> [4/5] Running Model Collapse Diagnostic Engine (v2.1)...")
+print(f"Output directory: {diag_dir}")
+print("Features: Manifest Cross-Check + NaN/Inf Pre-threshold Gating + AMP FP16 vs FP32 Parity + Aux Loss Distortion")
+
+run_streamed([
+    sys.executable, "-u", "scripts/diagnose_collapse.py",
+    "--ckpt-best", str(ckpt_best),
+    "--ckpt-last", str(ckpt_last),
+    "--expected-best-epoch", "70",
+    "--expected-last-epoch", "150",
+    "--data-dir", DATA_DIR,
+    "--fold", str(FOLD),
+    "--sw-roi-size", "96", "96", "64",
+    "--overlap", "0.25",
+    "--num-cases", "5",
+    "--output-dir", str(diag_dir),
+])
+
+report_file = diag_dir / "collapse_diagnosis_report.md"
+if report_file.exists():
+    print("\n" + "=" * 76)
+    print("BÁO CÁO ĐO ĐẠC THỰC NGHIỆM CHI TIẾT (OBJECTIVE DATA ONLY):")
+    print("=" * 76)
+    print(report_file.read_text(encoding="utf-8"))
 ```
