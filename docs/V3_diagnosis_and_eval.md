@@ -41,7 +41,7 @@ BRANCH_NAME = "long_exp"
 FOLD = 0
 
 # SHA hợp lệ trên origin/long_exp (đã bao gồm diagnose_collapse v2.1 và unit test CPU)
-COMMIT_SHA = "099a76db37e0b897e4594b4405332345820e2102"
+COMMIT_SHA = "952fa2a2d8e21cb1d12d146fa3ec3f5a50081454"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
