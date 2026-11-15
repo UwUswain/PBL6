@@ -40,8 +40,8 @@ REPO_URL = "https://github.com/UwUswain/PBL6.git"
 BRANCH_NAME = "long_exp"
 FOLD = 0
 
-# SHA hợp lệ trên origin/long_exp (đã bao gồm sửa fingerprint, fatal CUDA check, run identity parity)
-COMMIT_SHA = "8932051daa340aad9f7c40ceed7778b7ffdd0b0f"
+# SHA hợp lệ trên origin/long_exp (đã bao gồm định vị dataset động, BIDS parser verification, fatal CUDA check)
+COMMIT_SHA = "6cfda06144d273a99cd5d6965ccab0ff07cdfc4b"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
@@ -132,34 +132,77 @@ os.chdir(str(repo_dir))
 sys.path.insert(0, str(repo_dir))
 
 # ============================================================================
-# 3. GIẢI NÉN VÀ XÁC THỰC DATASET ISLES-2022 (250 CASES)
+# 3. ĐỊNH VỊ GIẢI NÉN & XÁC THỰC DATASET QUA BIDS PARSER (250 CASES)
 # ============================================================================
-raw_data_dir = Path("/kaggle/working/data/raw/ISLES-2022")
-raw_data_dir.mkdir(parents=True, exist_ok=True)
+print("\n>>> [2/5] Locating & strictly verifying 250-case ISLES-2022 dataset...")
+from src.dataset.parser import parse_isles_dataset, verify_isles_dataset
 
-existing_cases = list(raw_data_dir.glob("sub-strokecase*"))
-if len(existing_cases) < 250:
-    print("\n>>> [2/5] Locating and extracting ISLES-2022 archive (.sip / .zip)...")
+def find_real_isles_data_dir(candidate_roots: list) -> Path | None:
+    """Finds directory that directly contains sub-strokecase* folders and derivatives/."""
+    for root in candidate_roots:
+        if not root.exists():
+            continue
+        # Kiểm tra trực tiếp tại root
+        if (root / "derivatives").exists() and len(list(root.glob("sub-strokecase*"))) >= 250:
+            return root
+        # Kiểm tra các thư mục con (hỗ trợ cả archive có folder ngoài ISLES-2022 hoặc lồng nhiều tầng)
+        for cand in root.glob("**/derivatives"):
+            parent = cand.parent
+            if len(list(parent.glob("sub-strokecase*"))) >= 250:
+                return parent
+    return None
+
+search_roots = [
+    Path("/tmp/isles2022_extracted"),
+    Path("/kaggle/working/data/raw"),
+    Path("/kaggle/input"),
+]
+
+real_data_dir = find_real_isles_data_dir(search_roots)
+
+if real_data_dir is None:
+    print("Dataset not pre-extracted. Locating archive (.sip / .zip)...")
     sip_candidates = [
         Path("/kaggle/input/datasets/ivesunderthiscobal/isles-2022-250cases-sip/ISLES-2022.sip"),
         Path("/kaggle/input/datasets/ivesunderthiscobal/isles-2022-250cases-sip/ISLES-2022.zip"),
-    ] + list(Path("/kaggle/input").rglob("ISLES-2022.sip")) + list(Path("/kaggle/input").rglob("ISLES-2022.zip"))
-    
+    ] + list(Path("/kaggle/input").rglob("ISLES-2022*.sip")) + list(Path("/kaggle/input").rglob("ISLES-2022*.zip"))
+
     archive_to_extract = None
     for cand in sip_candidates:
         if cand.exists():
             archive_to_extract = cand
             break
-            
-    assert archive_to_extract is not None, "Could not locate ISLES-2022 archive (.sip or .zip) in /kaggle/input!"
-    print(f"Extracting {archive_to_extract} to {raw_data_dir}...")
-    with zipfile.ZipFile(archive_to_extract, "r") as zf:
-        zf.extractall(raw_data_dir)
 
-total_cases = len(list(raw_data_dir.glob("sub-strokecase*")))
-print(f"ISLES-2022 dataset ready: {total_cases} cases verified.")
-assert total_cases == 250, f"Expected 250 cases, found {total_cases}"
-DATA_DIR = str(raw_data_dir)
+    assert archive_to_extract is not None, "Could not locate ISLES-2022 archive (.sip or .zip) in /kaggle/input!"
+    extract_base = Path("/tmp/isles2022_extracted")
+    extract_base.mkdir(parents=True, exist_ok=True)
+    print(f"Extracting {archive_to_extract} to {extract_base}...")
+    t_start = time.time()
+    with zipfile.ZipFile(archive_to_extract, "r") as zf:
+        zf.extractall(extract_base)
+    print(f"Unpacked archive in {time.time() - t_start:.1f}s")
+
+    real_data_dir = find_real_isles_data_dir([extract_base])
+
+assert real_data_dir is not None, "Failed to identify directory directly containing sub-strokecase* and derivatives!"
+
+# Xác thực thực tế qua chính BIDS Dataset Parser & Integrity Guard
+print(f"Verifying dataset parser on {real_data_dir}...")
+parsed_cases = parse_isles_dataset(dataset_dir=real_data_dir, require_mask=True)
+ds_summary = verify_isles_dataset(
+    cases=parsed_cases,
+    expected_num_cases=250,
+    require_exact_isles250_ids=True,
+    required_modalities=["dwi", "adc"],
+)
+
+print(f"VERIFIED 250-CASE DATASET: {real_data_dir}")
+print(f"  Cases: {ds_summary['num_cases']}/250 (sub-strokecase0001..sub-strokecase0250)")
+print(f"  Canonical Fingerprint SHA256: {ds_summary['ids_sha256']}")
+assert ds_summary["num_cases"] == 250, f"Expected 250 valid cases, got {ds_summary['num_cases']}"
+assert ds_summary["ids_sha256"] == "d9e5eb71b2aae852", f"Dataset SHA mismatch: {ds_summary['ids_sha256']}"
+
+DATA_DIR = str(real_data_dir)
 
 # ============================================================================
 # 4. CHỌN CHECKPOINT TƯỜNG MINH VÀ XÁC MINH MANIFEST / EPOCH 70-150
