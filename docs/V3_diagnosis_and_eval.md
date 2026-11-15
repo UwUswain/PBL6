@@ -41,7 +41,7 @@ BRANCH_NAME = "long_exp"
 FOLD = 0
 
 # SHA hợp lệ trên origin/long_exp (đã bao gồm sửa fingerprint, fatal CUDA check, run identity parity)
-COMMIT_SHA = "277cdcd8801855fdfd75c25a422ee041d66a7ad2"
+COMMIT_SHA = "8932051daa340aad9f7c40ceed7778b7ffdd0b0f"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
