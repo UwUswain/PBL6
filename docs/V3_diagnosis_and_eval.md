@@ -41,7 +41,7 @@ BRANCH_NAME = "long_exp"
 FOLD = 0
 
 # SHA hợp lệ trên origin/long_exp (đã bao gồm định vị dataset động, BIDS parser verification, fatal CUDA check)
-COMMIT_SHA = "6cfda06144d273a99cd5d6965ccab0ff07cdfc4b"
+COMMIT_SHA = "ed21d607612f00889bcfa3c442435f2d62dbeebc"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
