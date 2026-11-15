@@ -40,8 +40,8 @@ REPO_URL = "https://github.com/UwUswain/PBL6.git"
 BRANCH_NAME = "long_exp"
 FOLD = 0
 
-# SHA hợp lệ trên origin/long_exp (đã bao gồm diagnose_collapse v2.1 và unit test CPU)
-COMMIT_SHA = "952fa2a2d8e21cb1d12d146fa3ec3f5a50081454"
+# SHA hợp lệ trên origin/long_exp (đã bao gồm sửa fingerprint, fatal CUDA check, run identity parity)
+COMMIT_SHA = "277cdcd8801855fdfd75c25a422ee041d66a7ad2"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
@@ -91,7 +91,9 @@ if py_actual != PINNED_ENV["python_major_minor"]:
     )
 
 if PINNED_ENV.get("torch_cuda") and torch_cuda_actual != PINNED_ENV["torch_cuda"]:
-    print(f"Notice: torch.version.cuda is {torch_cuda_actual} (pinned: {PINNED_ENV['torch_cuda']})")
+    raise RuntimeError(
+        f"CUDA version mismatch! Expected {PINNED_ENV['torch_cuda']}, got {torch_cuda_actual}"
+    )
 
 for pkg_name, exp_ver in PINNED_ENV["packages"].items():
     cur_ver = installed_ver(pkg_name)
@@ -164,47 +166,88 @@ DATA_DIR = str(raw_data_dir)
 # ============================================================================
 print("\n>>> [3/5] Explicit Checkpoint Discovery & Verification...")
 
-def resolve_checkpoint(preferred_path: Path, expected_epoch: int, filename: str) -> Path:
-    # 1. Kiểm tra preferred path tường minh
-    if preferred_path.exists():
-        ckpt = torch.load(preferred_path, map_location="cpu")
-        if ckpt.get("epoch") == expected_epoch:
-            return preferred_path
+def locate_explicit_run_dir() -> Path:
+    # 1. Kiểm tra preferred paths nếu đã cấu hình
+    if CKPT_BEST_PATH.exists() and CKPT_LAST_PATH.exists():
+        if CKPT_BEST_PATH.parent == CKPT_LAST_PATH.parent:
+            return CKPT_BEST_PATH.parent
 
-    # 2. Tìm kiếm trong các thư mục input / working nếu user đổi tên dataset
-    fallback_candidates = [
-        Path(f"/kaggle/input/isles-2022-v3-150ep-fold0/{filename}"),
-        Path(f"/kaggle/working/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807/{filename}"),
+    # 2. Kiểm tra danh sách các thư mục run khả dĩ chứa đồng thời cả best và last
+    candidate_dirs = [
+        Path("/kaggle/input/isles-2022-dataset-analysis/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807"),
+        Path("/kaggle/input/isles-2022-v3-150ep-fold0/dual_segresnet_fold0_20261113_091807"),
+        Path("/kaggle/input/isles-2022-v3-150ep-fold0/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807"),
+        Path("/kaggle/working/runs_paired_v3_patch_96_96_80_150ep_fold0_fold0/dual_segresnet_fold0_20261113_091807"),
     ]
-    for p in fallback_candidates:
-        if p.exists():
-            ckpt = torch.load(p, map_location="cpu")
-            if ckpt.get("epoch") == expected_epoch:
-                return p
+    for d in candidate_dirs:
+        if (d / "best_metric_model.pth").exists() and (d / "last_checkpoint.pth").exists():
+            return d
 
+    # 3. Quét tìm tất cả các thư mục chứa đồng thời cả hai file
+    valid_dirs = []
     for root in [Path("/kaggle/input"), Path("/kaggle/working")]:
-        for p in root.rglob("*.pth"):
-            if filename in p.name:
-                try:
-                    ckpt = torch.load(p, map_location="cpu")
-                    if ckpt.get("epoch") == expected_epoch:
-                        return p
-                except Exception:
-                    pass
+        for p in root.rglob("best_metric_model.pth"):
+            parent = p.parent
+            if (parent / "last_checkpoint.pth").exists() and parent not in valid_dirs:
+                valid_dirs.append(parent)
+
+    if len(valid_dirs) == 1:
+        return valid_dirs[0]
+    elif len(valid_dirs) > 1:
+        dirs_str = "\n".join(f"  - {d}" for d in valid_dirs)
+        raise RuntimeError(
+            f"Tìm thấy nhiều thư mục chứa checkpoint 150ep! Không tự động lấy ngẫu nhiên.\n"
+            f"Vui lòng gán trực tiếp CKPT_BEST_PATH và CKPT_LAST_PATH trong 1 thư mục cụ thể:\n{dirs_str}"
+        )
     return None
 
-ckpt_best = resolve_checkpoint(CKPT_BEST_PATH, expected_epoch=70, filename="best_metric_model.pth")
-ckpt_last = resolve_checkpoint(CKPT_LAST_PATH, expected_epoch=150, filename="last_checkpoint.pth")
+run_dir = locate_explicit_run_dir()
+if run_dir is None:
+    raise FileNotFoundError(
+        "CHƯA TÌM THẤY THƯ MỤC CHỨA CẢ 2 CHECKPOINT (best_metric_model.pth & last_checkpoint.pth)!\n"
+        "Hãy kiểm tra lại đường dẫn CKPT_BEST_PATH và CKPT_LAST_PATH, hoặc mount output của notebook vào /kaggle/input/."
+    )
 
+ckpt_best = run_dir / "best_metric_model.pth"
+ckpt_last = run_dir / "last_checkpoint.pth"
+
+print(f"Verified Run Directory       : {run_dir}")
 print(f"Checkpoint Best (Epoch 70)  : {ckpt_best}")
 print(f"Checkpoint Last (Epoch 150) : {ckpt_last}")
 
-if ckpt_best is None or ckpt_last is None:
-    raise FileNotFoundError(
-        "CHƯA TÌM THẤY CHECKPOINT 150-EPOCH HỢP LỆ (Epoch 70 / Epoch 150)!\n"
-        "Hãy nhìn sang cột phải của Kaggle -> Bấm '+ Add Input' -> Chọn tab 'Your Work' ->\n"
-        "Chọn notebook 'ISLES-2022 DATASET ANALYSIS' (Version 23 vừa chạy xong) để mount output vào /kaggle/input/."
-    )
+# Xác minh metadata và epoch ngay trên CPU
+data_b = torch.load(ckpt_best, map_location="cpu")
+data_l = torch.load(ckpt_last, map_location="cpu")
+
+assert data_b.get("epoch") == 70, f"Epoch mismatch in best checkpoint: expected 70, got {data_b.get('epoch')}"
+assert data_l.get("epoch") == 150, f"Epoch mismatch in last checkpoint: expected 150, got {data_l.get('epoch')}"
+
+mani_b = data_b.get("run_manifest")
+mani_l = data_l.get("run_manifest")
+assert mani_b is not None and mani_l is not None, "Both checkpoints MUST contain embedded run_manifest!"
+
+# Đối chiếu code/config và thông tin nhận diện run giữa best và last
+b_created = mani_b.get("created_at")
+l_created = mani_l.get("created_at")
+assert b_created == l_created, f"Run created_at mismatch! Best={b_created}, Last={l_created}. Checkpoints are from DIFFERENT runs!"
+
+b_commit = mani_b.get("code_version", {}).get("git_commit")
+l_commit = mani_l.get("code_version", {}).get("git_commit")
+assert b_commit == l_commit, f"Git commit mismatch! Best={b_commit}, Last={l_commit}"
+
+b_cfg_sha = mani_b.get("config", {}).get("config_sha256")
+l_cfg_sha = mani_l.get("config", {}).get("config_sha256")
+assert b_cfg_sha == l_cfg_sha, f"Config SHA256 mismatch! Best={b_cfg_sha}, Last={l_cfg_sha}"
+
+b_train_sha = mani_b.get("split", {}).get("train_sha256")
+l_train_sha = mani_l.get("split", {}).get("train_sha256")
+assert b_train_sha == l_train_sha, f"Train split SHA256 mismatch! Best={b_train_sha}, Last={l_train_sha}"
+
+b_val_sha = mani_b.get("split", {}).get("val_sha256")
+l_val_sha = mani_l.get("split", {}).get("val_sha256")
+assert b_val_sha == l_val_sha, f"Val split SHA256 mismatch! Best={b_val_sha}, Last={l_val_sha}"
+
+print(f"Pre-check PASSED: Checkpoints confirmed from EXACT SAME RUN ({b_created})!")
 
 # ============================================================================
 # 5. THỰC THI CHẨN ĐOÁN VÀ LƯU VÀO THƯ MỤC RIÊNG CÓ TIMESTAMP
@@ -232,6 +275,7 @@ run_streamed([
     "--ckpt-last", str(ckpt_last),
     "--expected-best-epoch", "70",
     "--expected-last-epoch", "150",
+    "--expected-cuda", "13.0",
     "--data-dir", DATA_DIR,
     "--fold", str(FOLD),
     "--sw-roi-size", "96", "96", "64",
