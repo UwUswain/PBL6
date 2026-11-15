@@ -31,7 +31,12 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 
-from src.dataset.parser import parse_isles_dataset, get_kfold_splits, compute_split_fingerprint
+from src.dataset.parser import (
+    compute_split_fingerprint,
+    get_kfold_splits,
+    parse_isles_dataset,
+    verify_isles_dataset,
+)
 from src.dataset.transforms import get_val_transforms
 from src.metrics.dice import compute_dice
 from src.models.builder import get_model
@@ -734,7 +739,13 @@ def main() -> None:
     ckpt_l, meta_l = verify_checkpoint_integrity(ckpt_last_path, args.expected_last_epoch, args.fold)
 
     # 2. Cross-check Split with Dataset Parser
-    all_cases = parse_isles_dataset(data_dir=args.data_dir, strict_isles250=True)
+    all_cases = parse_isles_dataset(dataset_dir=args.data_dir, require_mask=True)
+    verify_isles_dataset(
+        cases=all_cases,
+        expected_num_cases=250,
+        require_exact_isles250_ids=True,
+        required_modalities=["dwi", "adc"],
+    )
     splits = get_kfold_splits(all_cases, n_splits=args.n_splits, seed=args.seed)
     cross_check_split_with_dataset(all_cases, splits, args.fold, meta_b, meta_l)
 
