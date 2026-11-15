@@ -43,7 +43,7 @@ BRANCH_NAME = "long_exp"
 FOLD = 0
 
 # SHA hợp lệ trên origin/long_exp (đã bao gồm diagnose_collapse v2.0 và AMP/FP32 parity)
-COMMIT_SHA = "4abe146d65e0ce67664db30b5fb5dc6c9eec0c68"
+COMMIT_SHA = "d61fb828d2896b7d19f38be82afc74090715f950"
 
 PINNED_ENV = {
     "python_major_minor": "3.13",
