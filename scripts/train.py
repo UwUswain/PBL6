@@ -43,6 +43,74 @@ def _compute_model_checksum(model: nn.Module) -> Tuple[float, float]:
     return total_sum, float(total_sq ** 0.5)
 
 
+def verify_resume_checkpoint(
+    ckpt: Dict[str, Any],
+    model_name: str,
+    in_channels: int,
+    roi_size: Tuple[int, ...],
+    val_roi_size: Tuple[int, ...],
+    fold: int,
+    split_manifest: Dict[str, Any],
+    checkpoint_name: str = "checkpoint.pth",
+) -> None:
+    """Verifies that a checkpoint is valid for resuming training.
+
+    Validates:
+    - Presence of required state keys ('epoch', 'model_state_dict', etc.)
+    - Presence and valid schema of 'run_manifest' (specifically ['config']['resolved'] and ['split'])
+    - Matching model architecture, input channels, train ROI, val ROI, and fold
+    - Validation split hash consistency (to prevent training on mismatched splits)
+    """
+    required_keys = ["epoch", "model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "scaler_state_dict"]
+    missing_keys = [k for k in required_keys if k not in ckpt]
+    if missing_keys:
+        raise KeyError(f"Resume checkpoint {checkpoint_name} is missing required state keys: {missing_keys}")
+
+    if "run_manifest" not in ckpt:
+        raise KeyError(f"Resume checkpoint {checkpoint_name} missing required 'run_manifest'")
+
+    ckpt_manifest = ckpt["run_manifest"]
+    if not isinstance(ckpt_manifest, dict):
+        raise TypeError(f"Resume checkpoint {checkpoint_name} manifest must be a dict, got {type(ckpt_manifest)}")
+    if "config" not in ckpt_manifest or not isinstance(ckpt_manifest["config"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: 'config'")
+    if "resolved" not in ckpt_manifest["config"] or not isinstance(ckpt_manifest["config"]["resolved"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: ['config']['resolved']")
+    if "split" not in ckpt_manifest or not isinstance(ckpt_manifest["split"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: 'split'")
+
+    m_res = ckpt_manifest["config"]["resolved"]
+    m_split = ckpt_manifest["split"]
+
+    # 1. Architecture check
+    m_model = m_res.get("model_name")
+    if m_model != model_name:
+        raise ValueError(f"Resume model architecture mismatch: checkpoint has '{m_model}', config specifies '{model_name}'")
+
+    # 2. Input channel check
+    m_ch = m_res.get("in_channels")
+    if m_ch != in_channels:
+        raise ValueError(f"Resume input channel mismatch: checkpoint has {m_ch}, config specifies {in_channels}")
+
+    # 3. ROI check
+    m_roi = m_res.get("roi_size")
+    if m_roi != list(roi_size):
+        raise ValueError(f"Resume train ROI mismatch: checkpoint has {m_roi}, config specifies {list(roi_size)}")
+    m_val_roi = m_res.get("val_roi_size")
+    if m_val_roi != list(val_roi_size):
+        raise ValueError(f"Resume val ROI mismatch: checkpoint has {m_val_roi}, config specifies {list(val_roi_size)}")
+
+    # 4. Split fold and val hash check
+    m_fold = m_split.get("fold")
+    if m_fold != fold:
+        raise ValueError(f"Resume fold mismatch: checkpoint was trained on fold {m_fold}, requested fold {fold}")
+    if "val_sha256" in m_split and split_manifest.get("val_sha256"):
+        if m_split["val_sha256"] != split_manifest["val_sha256"]:
+            raise ValueError(f"Resume validation split hash mismatch: checkpoint has {m_split['val_sha256']}, dataloader has {split_manifest['val_sha256']}")
+
+    logger.info("Resume checkpoint manifest verified successfully: fold=%d, roi=%s, val_roi=%s", m_fold, m_roi, m_val_roi)
+
+
 def setup_logger(log_file: Path) -> None:
     """Configures multi-handler logging to file and standard stream."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -204,9 +272,12 @@ def train_epoch(
     model.train()
     epoch_loss = 0.0
     step_count = 0
+    total_patches = 0
     total_grad_norm = 0.0
     skipped_step_count = 0
-    empty_patch_count = 0
+    empty_patch_main_count = 0
+    empty_patch_aux1_count = 0
+    empty_patch_aux2_count = 0
     total_fg_main = 0
     total_fg_aux1 = 0
     total_fg_aux2 = 0
@@ -215,6 +286,8 @@ def train_epoch(
     total_main_loss = 0.0
     total_aux1_loss = 0.0
     total_aux2_loss = 0.0
+    has_aux = False
+    has_dice_focal = False
     last_scale = 1.0
 
     total_steps = len(loader) if hasattr(loader, "__len__") else 0
@@ -272,23 +345,37 @@ def train_epoch(
         gn_val = grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm)
         total_grad_norm += gn_val
 
-        # Light-weight telemetry collection without modifying backward or loss
+        # Telemetry per patch (element in batch) without modifying backward or loss
         with torch.no_grad():
-            fg_main = int((labels > 0.5).sum().item())
-            total_fg_main += fg_main
-            if fg_main == 0:
-                empty_patch_count += 1
+            b_size = labels.shape[0]
+            total_patches += b_size
+
+            # Per-patch foreground count for main target
+            for b in range(b_size):
+                p_fg = int((labels[b] > 0.5).sum().item())
+                total_fg_main += p_fg
+                if p_fg == 0:
+                    empty_patch_main_count += 1
 
             total_main_loss += main_loss.item()
             if isinstance(outputs, (tuple, list)):
-                fg_aux1 = int((target_aux1 > 0.5).sum().item())
-                fg_aux2 = int((target_aux2 > 0.5).sum().item())
-                total_fg_aux1 += fg_aux1
-                total_fg_aux2 += fg_aux2
+                has_aux = True
+                for b in range(b_size):
+                    p_fg_aux1 = int((target_aux1[b] > 0.5).sum().item())
+                    total_fg_aux1 += p_fg_aux1
+                    if p_fg_aux1 == 0:
+                        empty_patch_aux1_count += 1
+
+                    p_fg_aux2 = int((target_aux2[b] > 0.5).sum().item())
+                    total_fg_aux2 += p_fg_aux2
+                    if p_fg_aux2 == 0:
+                        empty_patch_aux2_count += 1
+
                 total_aux1_loss += aux1_loss.item()
                 total_aux2_loss += aux2_loss.item()
 
             if hasattr(loss_fn, "dice") and hasattr(loss_fn, "focal"):
+                has_dice_focal = True
                 m_dice = loss_fn.dice(main_out, labels).item()
                 m_focal = loss_fn.focal(main_out, labels).item()
                 total_main_dice += m_dice
@@ -296,35 +383,40 @@ def train_epoch(
 
         if (step + 1) % 25 == 0 or (step + 1) == total_steps:
             logger.info(
-                "    [Train Batch %d/%s] Step Loss: %.4f | Running Avg Loss: %.4f | Grad Norm: %.4f | FG Voxels: %d",
+                "    [Train Batch %d/%s] Step Loss: %.4f | Running Avg Loss: %.4f | Grad Norm: %.4f | Empty Patches: %d/%d",
                 step + 1,
                 str(total_steps) if total_steps > 0 else "?",
                 step_loss,
                 epoch_loss / step_count,
                 gn_val,
-                fg_main,
+                empty_patch_main_count,
+                total_patches,
             )
 
         if max_steps > 0 and step_count >= max_steps:
             break
 
-    n = max(step_count, 1)
+    n_steps = max(step_count, 1)
+    n_patches = max(total_patches, 1)
+
     telemetry = {
-        "train_loss": epoch_loss / n,
-        "main_loss": total_main_loss / n,
-        "aux1_loss": total_aux1_loss / n if total_aux1_loss > 0 else None,
-        "aux2_loss": total_aux2_loss / n if total_aux2_loss > 0 else None,
-        "main_dice": total_main_dice / n if total_main_dice > 0 else None,
-        "main_focal": total_main_focal / n if total_main_focal > 0 else None,
-        "grad_norm": total_grad_norm / n,
+        "train_loss": epoch_loss / n_steps,
+        "main_loss": total_main_loss / n_steps,
+        "aux1_loss": (total_aux1_loss / n_steps) if has_aux else None,
+        "aux2_loss": (total_aux2_loss / n_steps) if has_aux else None,
+        "main_dice": (total_main_dice / n_steps) if has_dice_focal else None,
+        "main_focal": (total_main_focal / n_steps) if has_dice_focal else None,
+        "grad_norm": total_grad_norm / n_steps,
         "amp_scale": last_scale,
         "skipped_steps": skipped_step_count,
-        "empty_patch_ratio": empty_patch_count / n,
-        "mean_fg_voxels": total_fg_main / n,
-        "mean_fg_aux1": total_fg_aux1 / n if total_fg_aux1 > 0 else None,
-        "mean_fg_aux2": total_fg_aux2 / n if total_fg_aux2 > 0 else None,
+        "empty_patch_ratio": float(empty_patch_main_count / n_patches),
+        "empty_patch_aux1_ratio": float(empty_patch_aux1_count / n_patches) if has_aux else None,
+        "empty_patch_aux2_ratio": float(empty_patch_aux2_count / n_patches) if has_aux else None,
+        "mean_fg_voxels": float(total_fg_main / n_patches),
+        "mean_fg_aux1": float(total_fg_aux1 / n_patches) if has_aux else None,
+        "mean_fg_aux2": float(total_fg_aux2 / n_patches) if has_aux else None,
     }
-    return epoch_loss / n, telemetry
+    return epoch_loss / n_steps, telemetry
 
 
 def validate(
@@ -639,44 +731,17 @@ def main() -> None:
 
         ckpt = torch.load(resume_file, map_location=device, weights_only=False)
 
-        required_keys = ["epoch", "model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "scaler_state_dict"]
-        missing_keys = [k for k in required_keys if k not in ckpt]
-        if missing_keys:
-            raise KeyError(f"Resume checkpoint {resume_file.name} is missing required state keys: {missing_keys}")
-
-        # Deep verification of run manifest in checkpoint if available
-        if "run_manifest" in ckpt:
-            ckpt_manifest = ckpt["run_manifest"]
-            m_res = ckpt_manifest.get("resolved", {})
-            m_split = ckpt_manifest.get("split", {})
-
-            # 1. Architecture check
-            m_model = m_res.get("model_name")
-            if m_model != model_name:
-                raise ValueError(f"Resume model architecture mismatch: checkpoint has '{m_model}', config specifies '{model_name}'")
-
-            # 2. Input channel check
-            m_ch = m_res.get("in_channels")
-            if m_ch != in_channels:
-                raise ValueError(f"Resume input channel mismatch: checkpoint has {m_ch}, config specifies {in_channels}")
-
-            # 3. ROI check
-            m_roi = m_res.get("roi_size")
-            if m_roi != list(roi_size):
-                raise ValueError(f"Resume train ROI mismatch: checkpoint has {m_roi}, config specifies {list(roi_size)}")
-            m_val_roi = m_res.get("val_roi_size")
-            if m_val_roi != list(val_roi_size):
-                raise ValueError(f"Resume val ROI mismatch: checkpoint has {m_val_roi}, config specifies {list(val_roi_size)}")
-
-            # 4. Split fold and val hash check
-            m_fold = m_split.get("fold")
-            if m_fold != args.fold:
-                raise ValueError(f"Resume fold mismatch: checkpoint was trained on fold {m_fold}, requested fold {args.fold}")
-            if "val_sha256" in m_split and split_manifest.get("val_sha256"):
-                if m_split["val_sha256"] != split_manifest["val_sha256"]:
-                    raise ValueError(f"Resume validation split hash mismatch: checkpoint has {m_split['val_sha256']}, dataloader has {split_manifest['val_sha256']}")
-
-            logger.info("Resume checkpoint manifest verified successfully: fold=%d, roi=%s, val_roi=%s", m_fold, m_roi, m_val_roi)
+        # Verify checkpoint state keys and manifest compatibility
+        verify_resume_checkpoint(
+            ckpt=ckpt,
+            model_name=model_name,
+            in_channels=in_channels,
+            roi_size=roi_size,
+            val_roi_size=val_roi_size,
+            fold=args.fold,
+            split_manifest=split_manifest,
+            checkpoint_name=resume_file.name,
+        )
 
         # Load weights into model
         model.load_state_dict(ckpt["model_state_dict"], strict=True)
@@ -808,6 +873,8 @@ def main() -> None:
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
             torch.cuda.empty_cache()
+
+        pre_train_sum, pre_train_l2 = _compute_model_checksum(model)
         t0_train = time.time()
         train_loss, train_telem = train_epoch(
             model=model,
@@ -828,10 +895,21 @@ def main() -> None:
         )
         if not math.isfinite(train_loss):
             raise RuntimeError(f"[DRY-RUN] Non-finite training loss observed: {train_loss}")
+
+        skipped = train_telem.get("skipped_steps", 0)
+        if skipped >= args.dry_run_steps:
+            raise RuntimeError(
+                f"[DRY-RUN] All {args.dry_run_steps} training steps were skipped by AMP GradScaler! "
+                f"No optimizer update occurred."
+            )
+
         scheduler.step()
-        post_sum, post_l2 = _compute_model_checksum(model)
-        if abs(post_sum - init_sum) < 1e-9 and abs(post_l2 - init_l2) < 1e-9 and not is_resumed:
-            raise RuntimeError("[DRY-RUN] Model weights did not change after optimizer step.")
+        post_train_sum, post_train_l2 = _compute_model_checksum(model)
+        if abs(post_train_sum - pre_train_sum) < 1e-9 and abs(post_train_l2 - pre_train_l2) < 1e-9:
+            raise RuntimeError(
+                f"[DRY-RUN] Model weights did not change after optimizer step "
+                f"(pre_sum={pre_train_sum:.6f}, post_sum={post_train_sum:.6f})."
+            )
         logger.info(
             "[DRY-RUN] Train steps + optimizer + scheduler OK | Loss: %.4f | Step: %.2fs/batch | Train Peak VRAM: %.1f MB (%.2f GB)",
             train_loss,
@@ -940,9 +1018,9 @@ def main() -> None:
         scaler.load_state_dict(reloaded_ckpt["scaler_state_dict"])
 
         reload_sum, reload_l2 = _compute_model_checksum(verify_model)
-        if abs(reload_sum - post_sum) > 1e-3 or abs(reload_l2 - post_l2) > 1e-4:
+        if abs(reload_sum - post_train_sum) > 1e-3 or abs(reload_l2 - post_train_l2) > 1e-4:
             raise RuntimeError(
-                f"[DRY-RUN] Weight mismatch after reload: saved=({post_sum:.6f}, {post_l2:.6f}) "
+                f"[DRY-RUN] Weight mismatch after reload: saved=({post_train_sum:.6f}, {post_train_l2:.6f}) "
                 f"vs reloaded=({reload_sum:.6f}, {reload_l2:.6f})."
             )
 
