@@ -25,12 +25,11 @@ Ba điểm khác bài: batch 2 thay vì 8, không pretrain BraTS, và khi train 
 
 ## Chuẩn bị trên Kaggle (làm một lần)
 
-1. Nén thư mục `kaggle/nvauto_repro` thành zip, tạo **Dataset** mới trên Kaggle (ví dụ tên `nvauto-repro`) và tải zip lên.
-2. Tạo **Notebook** mới, *File → Import Notebook* chọn `nvauto_kaggle.ipynb`.
-3. Trong notebook: *Settings → Accelerator = GPU T4 x2*, *Internet = On*.
-4. *Add Input*: dataset ISLES-2022 của nhóm (thư mục có `sub-strokecase*/` và `derivatives/`) và dataset `nvauto-repro`.
+1. Tạo **Notebook** mới, *File → Import Notebook → GitHub*, repo `UwUswain/PBL6`, nhánh `long_exp`, file `kaggle/nvauto_repro/nvauto_kaggle.ipynb`. Notebook tự `git clone` code, không cần tải code lên làm dataset.
+2. Trong notebook: *Settings → Accelerator = GPU T4 x2*, *Internet = On*.
+3. *Add Input*: dataset ISLES-2022 của nhóm (dạng thư mục có `sub-strokecase*/` và `derivatives/`, hoặc file nén `.sip`/`.zip`).
 
-Script tự tìm dữ liệu trong `/kaggle/input` và kiểm tra đủ 250 ca.
+Notebook tự tìm dữ liệu trong `/kaggle/input` (giải nén nếu cần) và script kiểm tra đủ 250 ca.
 
 ## Chạy
 
