@@ -1,0 +1,106 @@
+# NVAUTO reproduction config (Siddiquee et al., ISLES 2022, arXiv:2209.09546 = team's paper 22).
+# "[paper]" = value stated in the paper; "[template]" = Auto3DSeg default
+# (the tool NVIDIA used) where the paper is silent.
+
+bundle_root: null                           # fold folder, set by run_nvauto.py
+ckpt_path: $@bundle_root + '/model'
+mlflow_tracking_uri: $@ckpt_path + '/mlruns/'
+mlflow_experiment_name: "Auto3DSeg"
+
+data_file_base_dir: null                    # set by run_nvauto.py
+data_list_file_path: null                   # set by run_nvauto.py
+
+modality: mri
+fold: 0
+input_channels: 2                           # [paper] DWI + ADC only, no FLAIR
+output_classes: 2                           # background + lesion with softmax [paper: "1x1x1 convolution and a softmax"]
+class_names: [lesion]
+class_index: null
+
+debug: false
+ckpt_save: true
+cache_rate: null                            # [template] chosen from available RAM
+roi_size: [192, 192, 128]                   # [paper] 192x192x128 patch
+
+# all auto-scaling off to keep the paper's patch, batch and epoch definition
+auto_scale_allowed: false
+auto_scale_batch: false
+auto_scale_roi: false
+auto_scale_filters: false
+
+quick: false
+channels_last: true
+validate_final_original_res: true           # final Dice computed at original resolution
+calc_val_loss: false
+amp: true
+log_output_file: null
+cache_class_indices: null
+early_stopping_fraction: 0                  # [paper] full schedule, no early stopping
+determ: false
+orientation_ras: true
+crop_foreground: true
+
+learning_rate: 2.0e-4                       # [paper] AdamW lr 2e-4, cosine to 0
+batch_size: '@num_images_per_batch'
+num_images_per_batch: 1                     # [paper] batch 1 per GPU (paper: 8 GPUs = batch 8; Kaggle: 2 GPUs = batch 2)
+num_epochs: 1000                            # [paper] 1000 epochs; run_nvauto.py --epochs overrides
+num_warmup_epochs: 3                        # [template]
+sigmoid: false
+resample: true                              # [paper] resample to 1x1x1 mm
+resample_resolution: [1, 1, 1]
+crop_mode: ratio                            # [template] random crops balanced between background and lesion
+normalize_mode: meanstd                     # [paper] zero mean, unit std per image
+intensity_bounds: null
+
+num_epochs_per_validation: 10               # not in paper; fixed so resuming across sessions is predictable
+num_epochs_per_saving: 1                    # save model_final.pt every epoch so training can resume
+num_workers: 4
+num_steps_per_image: 1                      # 1 epoch = each image once
+num_crops_per_image: 1
+
+# ISLES 2022 data stats (used by Auto3DSeg to size the RAM cache), from the team's datastats
+image_size: [112, 112, 73]
+image_size_mm_median: [224.0, 224.0, 144.0]
+image_size_mm_90: [224.0, 224.0, 146.0]
+anisotropic_scales: false
+
+loss:
+  _target_: DiceFocalLoss                   # [paper] Dice + Focal, summed over deep-supervision levels
+  include_background: true
+  squared_pred: true
+  smooth_nr: 0
+  smooth_dr: 1.0e-05
+  softmax: $not @sigmoid
+  sigmoid: $@sigmoid
+  to_onehot_y: $not @sigmoid
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: '@learning_rate'
+  weight_decay: 1.e-5                       # [paper] weight decay 1e-5
+
+network:
+  _target_: SegResNetDS                     # [paper] SegResNet with deep supervision
+  init_filters: 32                          # [paper] 32 initial filters
+  blocks_down: [2, 4, 4, 4, 4]              # [paper] 5 stages with 2/4/4/4/4 blocks
+  norm: INSTANCE_NVFUSER                    # [paper] instance norm (plain InstanceNorm if apex is missing)
+  in_channels: '@input_channels'
+  out_channels: '@output_classes'
+  dsdepth: 4                                # [paper] deep supervision, weights 1/2^i via DeepSupervisionLoss
+
+finetune:
+  enabled: false
+  ckpt_name: $@bundle_root + '/model/model.pt'
+
+validate:
+  enabled: false
+  ckpt_name: $@bundle_root + '/model/model.pt'
+  output_path: $@bundle_root + '/prediction_validation'
+  save_mask: false
+  invert: true
+
+infer:
+  enabled: false
+  ckpt_name: $@bundle_root + '/model/model.pt'
+  output_path: $@bundle_root + '/prediction_' + @infer#data_list_key
+  data_list_key: testing

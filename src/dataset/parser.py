@@ -40,6 +40,11 @@ def _find_file(folder: Optional[Path], *patterns: str) -> Optional[Path]:
         target = folder / p
         if target.is_file():
             return target
+        # Local copy: "<name>.nii" can be a folder holding the one real file under another name
+        if target.is_dir():
+            inner = sorted(f for f in target.glob("*.nii*") if f.is_file())
+            if inner:
+                return inner[0]
     for p in patterns:
         matches = [m for m in folder.rglob(p) if m.is_file()]
         if matches:

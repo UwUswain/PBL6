@@ -1,6 +1,7 @@
 """Unit test suite for ISLES-2022 dataset parser and transforms."""
 
 from pathlib import Path
+import tempfile
 import unittest
 import monai.data as md
 import monai.transforms as mt
@@ -52,6 +53,26 @@ class TestISLESDataset(unittest.TestCase):
         self.assertTrue(Path(first_case["adc"]).exists(), "ADC file missing")
         self.assertTrue(Path(first_case["flair"]).exists(), "FLAIR file missing")
         self.assertTrue(Path(first_case["mask"]).exists(), "Mask file missing")
+
+    def test_parse_nii_inside_same_named_folder(self) -> None:
+        """Local copy stores `<case>_dwi.nii/` as a folder holding the real file under another name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case, ses = "sub-strokecase0002", "ses-0001"
+            dwi_dir = root / case / ses / "dwi"
+            for mod in ("dwi", "adc"):
+                folder = dwi_dir / f"{case}_{ses}_{mod}.nii"
+                folder.mkdir(parents=True)
+                (folder / f"sub-Stroke72_iso_{mod}_skull_stripped.nii").touch()
+            mask_dir = root / "derivatives" / case / ses
+            mask_dir.mkdir(parents=True)
+            (mask_dir / f"{case}_{ses}_msk.nii").touch()
+
+            cases = parse_isles_dataset(root, require_mask=True)
+
+            self.assertEqual(len(cases), 1)
+            self.assertTrue(Path(cases[0]["dwi"]).is_file())
+            self.assertTrue(cases[0]["adc"].endswith("adc_skull_stripped.nii"))
 
     def test_kfold_splits_disjoint(self) -> None:
         """Verifies that K-Fold splits have zero overlap and cover the entire dataset."""
