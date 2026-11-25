@@ -13,6 +13,7 @@ ADMIN_USER, ADMIN_PASS = "admin", "Bootstrap-Pass-1"
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_KEY_DIR", tempfile.mkdtemp(prefix="pbl6_jwt_"))
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pbl6_data_"))
 os.environ.setdefault("BOOTSTRAP_ADMIN_USERNAME", ADMIN_USER)
 os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", ADMIN_PASS)
 if str(BACKEND) not in sys.path:

@@ -7,3 +7,5 @@ alembic==1.18.4
 psycopg[binary]==3.3.3
 argon2-cffi==25.1.0
 PyJWT[crypto]==2.12.1
+numpy==2.2.6
+nibabel==5.4.2

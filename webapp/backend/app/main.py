@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text
 from app import config
 from app.db import SessionLocal, engine
 from app.models import User
-from app.routers import admin, auth
+from app.routers import admin, auth, clinical
 from app.security import hash_password
 
 log = logging.getLogger("pbl6")
@@ -35,9 +35,10 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="PBL6 Stroke Platform API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="PBL6 Stroke Platform API", version="0.3.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(clinical.router)
 
 
 @app.get("/api/v1/health/live")

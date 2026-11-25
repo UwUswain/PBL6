@@ -37,16 +37,15 @@ class AuthFlowTest(unittest.TestCase):
     def admin_token(self):
         """Admin with the bootstrap password changed (idempotent across tests)."""
         c = self.client()
-        r = c.post("/api/v1/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
+        # Changed password first: failed tries count toward the login rate limit.
+        r = c.post("/api/v1/auth/login", json={"username": ADMIN_USER, "password": "Strong-New-Pass-42"})
         if r.status_code == 200:
-            tok = r.json()["access_token"]
-            if r.json()["user"]["must_change_password"]:
-                r = c.post("/api/v1/auth/change-password", headers=self.bearer(tok),
-                           json={"current_password": ADMIN_PASS, "new_password": "Strong-New-Pass-42"})
-                self.assertEqual(r.status_code, 200, r.text)
-                tok = r.json()["access_token"]
-            return tok
-        return self.login(c, ADMIN_USER, "Strong-New-Pass-42")["access_token"]
+            return r.json()["access_token"]
+        tok = self.login(c, ADMIN_USER, ADMIN_PASS)["access_token"]
+        r = c.post("/api/v1/auth/change-password", headers=self.bearer(tok),
+                   json={"current_password": ADMIN_PASS, "new_password": "Strong-New-Pass-42"})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["access_token"]
 
     def test_forced_password_change_blocks_everything_else(self):
         # A fresh account (bootstrap admin may already be changed by another test; order-independent).
