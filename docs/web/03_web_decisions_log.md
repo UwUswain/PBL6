@@ -27,12 +27,16 @@
 | 25/11 | **M0 xong:** `webapp/` gồm FastAPI + Alembic, React 19 + Vite 6 + TS 5.8, docker compose (postgres 16, api, nginx, worker); **worker trong Docker thấy RTX 4060** | Gỡ rủi ro lớn nhất (GPU trong Docker trên Windows) |
 | 25/11 | **M1 backend xong:** Argon2id, JWT RS256 10 phút kèm kiểm tra phiên trong DB, refresh token xoay vòng có phát hiện dùng lại, khóa tạm khi đăng nhập sai, bắt đổi mật khẩu lần đầu, admin quản lý tài khoản, nhật ký; kiểm tra trên PostgreSQL qua nginx | Chi tiết trong commit `b3bb08d` |
 | 25/11 | Cài skill **taste-skill** (`design-taste-frontend` 2.5.1, MIT) vào `D:\PBL6-test_model\.claude\skills` (ngoài repo). Chỉ dùng có chọn lọc: luật câu chữ, khả năng truy cập, hiệu năng, hover. Không áp luật kiểu trang quảng cáo (mỗi màn một section, ảnh stock, hiệu ứng shader) cho viewer và các trang nghiệp vụ | Skill viết cho website công ty/landing page; web của nhóm là ứng dụng y tế |
+| 25/11 | **M1 frontend xong:** đăng nhập, bắt đổi mật khẩu, khung giao diện theo vai trò, admin quản lý tài khoản và nhật ký, Việt/Anh | Kiểm tra trên Chrome headless |
+| 25/11 | **M2 xong:** bệnh nhân giả danh (mã, năm sinh, giới tính), ca chụp, tải ảnh có kiểm tra (chỉ đọc header, DWI/ADC cùng lưới, khóa ảnh sau khi AI chạy), hàng đợi job và worker GPU (`FOR UPDATE SKIP LOCKED`), mask có phiên bản, duyệt; trên Docker ca 0121 cho **4,664 mL, Dice 0,9005**, trùng hệt web cũ | Worker dùng lại nguyên `web/inference.py` và `web/regions.py` |
+| 25/11 | Sự cố ổ D (còn 3 GB): pip tự nâng torch lên 2.15/cu132 khi cài MONAI 1.6 (metadata đòi torch ≥ 2.8), image worker phình 19,2 GB. Sửa: khóa torch 2.5.1 bằng constraints, cài MONAI `--no-deps`; image còn 10,5 GB; bộ nhớ đệm build đã dọn (được bạn đồng ý) | Giữ đúng môi trường đã train và kiểm chứng |
 | 25/11 | Khác biệt chính: **vai trò bệnh nhân** (dễ hiểu, tôn trọng tâm lý, có khu vực chờ để bệnh nhân bấm, khám phá); họ tên thật: quyết sau | Nhóm bạn không có vai trò này |
 
 ## 2. Việc đang dở
 
 - Tải gói trọng số DeepISLES: dừng ở 5,0/8,5 GB (tải tiếp được, có kiểm tra MD5), chưa giải nén. Sau đó thêm 3 mục vào `web/config.yaml` và chạy thử.
-- Giai đoạn 7: M0 xong; M1 backend xong; đang làm M1 frontend (đăng nhập, đổi mật khẩu, khung theo vai trò, trang admin).
+- Giai đoạn 7: M0, M1, M2 xong. Tiếp theo M3: chuyển viewer sang React (xem, sửa mask), cổng bệnh nhân bản 1.
+- Chờ bạn quyết: lệnh khôi phục admin; bỏ bắt buộc dòng mật khẩu bootstrap trong `.env`; file tải dở 5 GB `external/stroke_ensemble_weights.7z.parts`; `archive.zip` 1,7 GB ở `D:\PBL6-test_model`.
 - Khu vực chờ của bệnh nhân: chờ bàn nội dung.
 - Cải tiến viewer học từ nhóm bạn (phím tắt, nhảy lát có tổn thương, phóng to một ô): chưa làm.
 
