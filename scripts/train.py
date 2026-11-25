@@ -667,21 +667,31 @@ def main() -> None:
     if seed_val is not None:
         set_determinism(seed=seed_val)
 
+    model_kwargs = {}
+    normalized_model_name = model_name.lower().strip()
+    if normalized_model_name in (
+        "dual_segresnet",
+        "dual_encoder_segresnet",
+    ):
+        model_kwargs.update(
+            init_filters=init_filters,
+            fusion_mode=fusion_mode,
+            deep_supervision=deep_supervision,
+        )
+    elif normalized_model_name == "segresnet":
+        model_kwargs["init_filters"] = init_filters
+
     logger.info(
-        "Instantiating %s (channels: %d, init_filters: %d, fusion: %s, deep_supervision: %s)...",
+        "Instantiating %s (channels: %d, options: %s)...",
         model_name,
         in_channels,
-        init_filters,
-        fusion_mode,
-        deep_supervision,
+        model_kwargs,
     )
     model = get_model(
         model_name=model_name,
         in_channels=in_channels,
         out_channels=1,
-        init_filters=init_filters,
-        fusion_mode=fusion_mode,
-        deep_supervision=deep_supervision,
+        **model_kwargs,
     ).to(device)
 
     init_sum, init_l2 = _compute_model_checksum(model)
@@ -1009,9 +1019,7 @@ def main() -> None:
             model_name=model_name,
             in_channels=in_channels,
             out_channels=1,
-            init_filters=init_filters,
-            fusion_mode=fusion_mode,
-            deep_supervision=deep_supervision,
+            **model_kwargs,
         ).to(device)
         verify_model.load_state_dict(reloaded_ckpt["model_state_dict"], strict=True)
         optimizer.load_state_dict(reloaded_ckpt["optimizer_state_dict"])

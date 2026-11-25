@@ -1,0 +1,12 @@
+experiment:
+  model_name: "swin_unetr"
+  in_channels: 2
+  max_epochs: 30
+  learning_rate: 0.0001
+
+data:
+  modalities: ["dwi", "adc"]
+  roi_size: [96, 96, 32]
+  batch_size: 1
+  num_workers: 4
+  use_cache: false

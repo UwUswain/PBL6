@@ -280,23 +280,27 @@ def _build_load_and_fuse_steps(
             mt.SelectItemsd(keys=["image", "mask"]),
         ]
 
-    # Explicit modality selection
     if modalities is not None and len(modalities) > 0:
-        keys_to_load = [m.lower().strip() for m in modalities]
-        concat_keys = list(keys_to_load)
-        all_keys = concat_keys + ["mask"]
-        return [
-            mt.LoadImaged(keys=all_keys, ensure_channel_first=True),
-            mt.ConcatItemsd(keys=concat_keys, name="image", dim=0),
-            mt.SelectItemsd(keys=["image", "mask"]),
-        ]
+        mods = [m.lower().strip() for m in modalities]
+    else:
+        mods = ["dwi", "adc", "flair"]
 
-    # Default fallback: 3-channel (DWI, ADC, FLAIR)
-    return [
-        mt.LoadImaged(keys=["dwi", "adc", "flair", "mask"], ensure_channel_first=True),
-        mt.ConcatItemsd(keys=["dwi", "adc", "flair"], name="image", dim=0),
-        mt.SelectItemsd(keys=["image", "mask"]),
+    steps = [
+        mt.LoadImaged(keys=mods + ["mask"], ensure_channel_first=True),
     ]
+    if "flair" in mods and "dwi" in mods:
+        steps.append(
+            mt.ResampleToMatchd(
+                keys=["flair"],
+                key_dst="dwi",
+                mode="bilinear",
+            )
+        )
+    steps.extend([
+        mt.ConcatItemsd(keys=mods, name="image", dim=0),
+        mt.SelectItemsd(keys=["image", "mask"]),
+    ])
+    return steps
 
 
 def get_train_transforms(
@@ -474,6 +478,7 @@ def get_isles_transforms(
     pos_ratio: float = 1.0,
     neg_ratio: float = 1.0,
     use_edwi: bool = False,
+    modalities: Optional[Sequence[str]] = None,
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
 ) -> mt.Compose:
@@ -487,6 +492,7 @@ def get_isles_transforms(
             pos_ratio=pos_ratio,
             neg_ratio=neg_ratio,
             use_edwi=use_edwi,
+            modalities=modalities,
             clip_limit=clip_limit,
             tile_grid_size=tile_grid_size,
         )
@@ -494,6 +500,7 @@ def get_isles_transforms(
         return get_val_transforms(
             target_spacing=target_spacing,
             use_edwi=use_edwi,
+            modalities=modalities,
             clip_limit=clip_limit,
             tile_grid_size=tile_grid_size,
         )
