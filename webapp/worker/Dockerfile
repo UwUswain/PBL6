@@ -1,9 +1,20 @@
-# Same torch/CUDA as the local training environment (torch 2.5.1 + cu121).
+# Built from the repository root (see webapp/docker-compose.yml) so the ML code in src/ and web/ is copied in.
+# Dockerfile.dockerignore next to this file keeps the build context small (no datasets, no checkpoints).
 FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+
+COPY webapp/worker/requirements.txt webapp/worker/constraints.txt /tmp/
+RUN pip install -r /tmp/requirements.txt -c /tmp/constraints.txt
+
+RUN useradd --create-home --uid 1000 worker && mkdir -p /srv/data && chown worker /srv/data
+COPY src/ /srv/app/src/
+COPY web/inference.py web/regions.py web/config.yaml /srv/app/web/
+COPY web/atlas/ /srv/app/web/atlas/
+COPY webapp/backend/app/ /srv/backend/app/
+COPY webapp/worker/worker.py webapp/worker/gpu_check.py /srv/worker/
+USER worker
 WORKDIR /srv/worker
 
-COPY gpu_check.py .
-# shortcut: M0 only checks the GPU; the job-queue worker (M2) replaces this command.
-CMD ["python", "gpu_check.py"]
+CMD ["python", "worker.py"]

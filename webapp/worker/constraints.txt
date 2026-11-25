@@ -1,0 +1,2 @@
+# The base image already has torch 2.5.1 + CUDA 12.1; never let pip replace it (it pulled torch 2.15/cu132, +10 GB).
+torch==2.5.1
