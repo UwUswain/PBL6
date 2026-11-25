@@ -1,0 +1,1413 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PBL6 Stroke Viewer</title>
+<!-- NiiVue 0.69.0 (BSD-2-Clause) đóng gói sẵn để demo không cần mạng -->
+<script src="vendor/niivue-0.69.0.umd.js"
+        integrity="sha384-Oyof6MyzZMH1tvMLLYFRQLWZtk9Y/WbiL3wkdXzwaCS82xRXXy9U+kRrkDDAVq6E"></script>
+<style>
+  :root {
+    /* Đen - đỏ (tham khảo bảng màu rapidai.com): đen/xám than làm nền, đỏ #CE0E2D chỉ để nhấn */
+    --bg: #f0f2f5; --panel: #ffffff; --text: #141414; --muted: #555555; --line: #e2e5e9;
+    --accent: #ce0e2d; --accent-text: #ffffff; --danger: #ce0e2d; --warn-bg: #fbeaec; --warn-text: #720819;
+    --lesion: #ce0e2d; --viewer: #000000;
+    --header: #000000; --header-line: #ce0e2d;
+    /* Ô viewer: trung tính, phân biệt bằng nhãn; không thêm màu cạnh tranh với vùng tổn thương */
+    --tile-axial: #3a3f47; --tile-coronal: #3a3f47; --tile-sagittal: #3a3f47; --tile-render: #3a3f47;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0a0b; --panel: #151619; --text: #ededed; --muted: #9a9a9a; --line: #272d37;
+      --accent: #e0223f; --accent-text: #ffffff; --danger: #ff4d64; --warn-bg: #36040c; --warn-text: #ffdac1;
+      --lesion: #ff3b55;
+      --header: #000000; --header-line: #8a0a1e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 Poppins, "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header .brand strong { font-size: 16px; }
+  header .brand span { color: var(--muted); margin-left: 8px; }
+  .lang button { border: 1px solid var(--line); background: transparent; color: var(--text); padding: 4px 10px; cursor: pointer; font-weight: 600; }
+  .lang button:first-child { border-radius: 6px 0 0 6px; }
+  .lang button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  .lang button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .disclaimer { margin: 0; padding: 8px 16px; background: var(--warn-bg); color: var(--warn-text); font-weight: 500; }
+  main { display: grid; grid-template-columns: 280px minmax(0, 1fr) 280px; gap: 12px; padding: 12px; height: calc(100vh - 92px); min-height: 560px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow-y: auto; }
+  .panel section + section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; margin: 8px 0; }
+  select, input[type="file"] { width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  input[type="range"] { width: 100%; }
+  .check { display: flex; align-items: center; gap: 8px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+  .tabs { display: flex; margin-bottom: 10px; }
+  .tabs button { flex: 1; padding: 6px; border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; font: inherit; }
+  .tabs button:first-child { border-radius: 6px 0 0 6px; }
+  .tabs button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  .tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .file-label { font-weight: 600; font-size: 12px; }
+  .seg { display: flex; gap: 0; }
+  .seg label { flex: 1; margin: 0; }
+  .seg input { position: absolute; opacity: 0; }
+  .seg span { display: block; text-align: center; padding: 6px; border: 1px solid var(--line); cursor: pointer; }
+  .seg label:first-child span { border-radius: 6px 0 0 6px; }
+  .seg label:last-child span { border-radius: 0 6px 6px 0; }
+  .seg label + label span { border-left: 0; }
+  .seg input:checked + span { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .seg input:disabled + span { opacity: .4; cursor: not-allowed; }
+  .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .primary, .button { display: block; width: 100%; margin-top: 12px; padding: 9px; border-radius: 6px; border: 0; background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; text-align: center; text-decoration: none; cursor: pointer; }
+  .button { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .primary:disabled, .button[aria-disabled="true"] { opacity: .45; cursor: not-allowed; pointer-events: none; }
+  .status { min-height: 20px; margin: 8px 0 0; font-size: 13px; }
+  .status.error { color: var(--danger); }
+  .viewer { position: relative; background: var(--viewer); border-radius: 10px; overflow: hidden; min-height: 400px; }
+  .viewer canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .viewer .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa7b4; padding: 24px; text-align: center; pointer-events: none; }
+  .viewer .loc { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 10px; font: 12px ui-monospace, Consolas, monospace; color: #cfd8e3; background: rgba(0,0,0,.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  dl { margin: 0; }
+  dl div { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+  dl .big { display: block; padding: 4px 0 12px; }
+  dl .big dd { text-align: left; font-size: 32px; color: var(--lesion); line-height: 1.2; }
+  dl .big dd small { font-size: 16px; color: var(--muted); font-weight: 500; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .modes { display: flex; gap: 4px; }
+  .modes button { border: 1px solid var(--line); background: transparent; color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 600; }
+  .modes button[aria-selected="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .modes button:disabled { opacity: .45; cursor: not-allowed; }
+  textarea { width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+  textarea:disabled { opacity: .7; }
+  .approved { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, #2e7d32 18%, transparent); color: var(--text); font-weight: 600; }
+  /* Chế độ bệnh nhân: ẩn công cụ bác sĩ, giữ nguyên canvas để không mất WebGL */
+  body.patient main { grid-template-columns: minmax(0, 1fr) 420px; }
+  body.patient #doctorLeft, body.patient #doctorRight, body.patient .viewer .loc { display: none; }
+  .regions { width: 100%; border-collapse: collapse; }
+  .regions td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .regions td + td { text-align: right; font-variant-numeric: tabular-nums; padding-left: 8px; white-space: nowrap; }
+  .model-note { color: var(--warn-text); background: var(--warn-bg); padding: 6px 8px; border-radius: 6px; }
+  .compare th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; padding: 2px 0; }
+  .compare th + th { text-align: right; }
+  .compare td { font-size: 12px; }
+  .compare td:nth-child(2), .compare th:nth-child(2) { white-space: normal; text-align: left; overflow-wrap: anywhere; }  /* tên model dài: xuống dòng */
+  .compare tr.current td { font-weight: 700; color: var(--accent); }
+  .patient-panel { font-size: 15px; }
+  .patient-panel h3 { font-size: 15px; margin: 18px 0 6px; }
+  .patient-panel ul { margin: 0; padding-left: 20px; }
+  .patient-panel li + li { margin-top: 4px; }
+  .patient-panel .note { white-space: pre-wrap; padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--bg); }
+  /* Màu sắc: phẳng, viền mảnh */
+  header { background: var(--header); color: #ffffff; border-bottom: 3px solid var(--header-line); }
+  header .modes button, header .lang button { color: #d9d9d9; border-color: rgba(255, 255, 255, .2); }
+  header .modes button[aria-selected="true"], header .lang button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .panel, .viewer, .cell { border-radius: 6px; }
+  /* Nút chọn dạng phân đoạn: đen (sáng) / trắng (tối), để đỏ chỉ còn ở hành động chính và con số tổn thương */
+  .tabs button[aria-selected="true"], .seg input:checked + span { background: var(--text); color: var(--panel); border-color: var(--text); }
+  input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--accent); }
+  .viewer canvas:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; }  /* viền đỏ quanh viewer dễ bị hiểu là lỗi */
+  .primary, .button, select, textarea, .tabs button, .seg span { border-radius: 4px; }
+  /* Viewer bác sĩ: 4 ô riêng, khoảng trống giữa các ô là nền trang. Số đo phải khớp CELL_* trong script */
+  .viewer { background: transparent; overflow: visible; }
+  .cells { position: absolute; inset: 0; display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 10px; pointer-events: none; }
+  .cell { background: var(--viewer); border: 1px solid #262c32; border-top: 2px solid var(--c); padding: 5px 10px; overflow: hidden; }
+  .cell span { display: block; font-size: 11px; font-weight: 600; line-height: 18px; letter-spacing: .04em; text-transform: uppercase; color: #aab4bd; }
+  .cell.axial { --c: var(--tile-axial); }
+  .cell.coronal { --c: var(--tile-coronal); }
+  .cell.sagittal { --c: var(--tile-sagittal); }
+  .cell.render { --c: var(--tile-render); }
+  .viewer .loc { right: auto; max-width: calc(50% - 5px); border-radius: 0 0 0 6px; }  /* chỉ nằm trong ô dưới-trái, không vắt qua khe */
+  body.patient .viewer { background: var(--viewer); overflow: hidden; }
+  body.patient .cells { display: none; }
+  .views { display: flex; flex-wrap: wrap; gap: 6px; }
+  .views button { flex: 1 1 auto; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font: inherit; }
+  #report { display: none; }
+  dialog { max-width: 620px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 20px; }
+  dialog::backdrop { background: rgba(0, 0, 0, .55); }
+  dialog h2 { font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--text); }
+  dialog h3 { font-size: 13px; margin: 16px 0 6px; }
+  dialog table { width: 100%; border-collapse: collapse; }
+  dialog td { padding: 5px 0; border-bottom: 1px solid var(--line); }
+  dialog td:last-child { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  @media print {
+    body { background: #fff; color: #000; font-size: 12pt; }
+    body > *:not(#report) { display: none !important; }
+    #report { display: block !important; }
+    #report h1 { font-size: 18pt; margin: 0 0 4pt; }
+    #report h2 { font-size: 13pt; color: #000; text-transform: none; letter-spacing: 0; margin: 14pt 0 4pt; break-after: avoid; }
+    #report .imgs, #report li, #report .note { break-inside: avoid; }
+    #report .meta { color: #444; margin: 0 0 8pt; }
+    #report .warn { border: 1px solid #b26a00; padding: 6pt 8pt; margin: 8pt 0; }
+    #report table { border-collapse: collapse; width: 100%; }
+    #report td { border-bottom: 1px solid #ccc; padding: 3pt 4pt; }
+    #report td:last-child { text-align: right; font-weight: 600; }
+    #report .imgs { display: flex; gap: 8pt; }
+    #report .imgs figure { flex: 1; margin: 0; }
+    #report .imgs img { width: 100%; background: #000; }
+    #report figcaption { font-size: 10pt; color: #444; text-align: center; }
+    #report .note { white-space: pre-wrap; }
+  }
+  @media (max-width: 1000px) {
+    main, body.patient main { grid-template-columns: 1fr; height: auto; }
+    .viewer { height: 70vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><strong data-i18n="title"></strong></div>
+  <div class="modes" role="tablist">
+    <button type="button" role="tab" id="modeDoctor" aria-selected="true" data-i18n="modeDoctor"></button>
+    <button type="button" role="tab" id="modePatient" aria-selected="false" disabled data-i18n="modePatient"></button>
+    <button type="button" id="aboutBtn" data-i18n="about"></button>
+  </div>
+  <div class="lang" role="group" aria-label="Language">
+    <button type="button" data-lang="vi">VI</button><button type="button" data-lang="en">EN</button>
+  </div>
+</header>
+<p class="disclaimer" role="note" data-i18n="disclaimer"></p>
+
+<main>
+  <aside class="panel" id="doctorLeft">
+    <section>
+      <h2 data-i18n="model"></h2>
+      <label><span class="sr-only" data-i18n="model"></span><select id="model"></select></label>
+      <label class="check"><input type="checkbox" id="useFlair"> <span data-i18n="useFlair"></span></label>
+      <p class="hint" id="flairHint"></p>
+      <p class="hint model-note" id="modelNote" hidden></p>
+    </section>
+
+    <section>
+      <h2 data-i18n="input"></h2>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tabSample" aria-selected="true" data-i18n="sampleCase"></button>
+        <button type="button" role="tab" id="tabUpload" aria-selected="false" data-i18n="upload"></button>
+      </div>
+      <div id="paneSample">
+        <label><select id="case"></select></label>
+      </div>
+      <div id="paneUpload" hidden>
+        <label><span class="file-label">DWI</span><input type="file" id="f_dwi" accept=".nii,.gz"></label>
+        <label><span class="file-label">ADC</span><input type="file" id="f_adc" accept=".nii,.gz"></label>
+        <label id="flairRow"><span class="file-label">FLAIR</span><input type="file" id="f_flair" accept=".nii,.gz"></label>
+        <p class="hint" data-i18n="fileHint"></p>
+      </div>
+      <button type="button" class="primary" id="run" data-i18n="run"></button>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section>
+      <h2 data-i18n="display"></h2>
+      <p class="hint" data-i18n="background" style="margin:0 0 6px"></p>
+      <div class="seg" id="bgGroup">
+        <label><input type="radio" name="bg" value="dwi" checked><span>DWI</span></label>
+        <label><input type="radio" name="bg" value="adc"><span>ADC</span></label>
+        <label><input type="radio" name="bg" value="flair"><span>FLAIR</span></label>
+      </div>
+      <label class="check" style="margin-top:12px"><input type="checkbox" id="showMask" checked> <span data-i18n="showMask"></span></label>
+      <label><span data-i18n="opacity"></span>: <output id="opVal">50%</output>
+        <input type="range" id="opacity" min="0" max="100" value="50"></label>
+      <label class="check"><input type="checkbox" id="showGt"> <span data-i18n="showGt"></span></label>
+      <p class="hint" id="gtLegend" data-i18n="gtLegend" hidden></p>
+      <label class="check"><input type="checkbox" id="radiological"> <span data-i18n="radiological"></span></label>
+      <a class="button" id="download" download="predicted_mask.nii.gz" aria-disabled="true" data-i18n="download"></a>
+    </section>
+
+    <section id="editSection" hidden>
+      <h2 data-i18n="editTitle"></h2>
+      <button type="button" class="button" id="editStart" data-i18n="editStart"></button>
+      <div id="editTools" hidden>
+        <div class="seg" style="margin-top:4px">
+          <label><input type="radio" name="tool" value="draw" checked><span data-i18n="toolDraw"></span></label>
+          <label><input type="radio" name="tool" value="erase"><span data-i18n="toolErase"></span></label>
+        </div>
+        <label><span data-i18n="penSize"></span>: <output id="penVal">2</output>
+          <input type="range" id="penSize" min="1" max="10" value="2"></label>
+        <div class="views">
+          <button type="button" id="editUndo" data-i18n="editUndo"></button>
+          <button type="button" id="editReset" data-i18n="editReset"></button>
+        </div>
+        <p class="hint" data-i18n="editHint"></p>
+        <p id="editLive" style="font-weight:600"></p>
+        <button type="button" class="primary" id="editSave" data-i18n="editSave"></button>
+        <button type="button" class="button" id="editCancel" data-i18n="editCancel"></button>
+      </div>
+    </section>
+  </aside>
+
+  <section class="viewer" aria-label="MRI viewer">
+    <!-- 4 ô nền nằm dưới canvas trong suốt; NiiVue vẽ từng mặt cắt đúng vào ô (setCustomLayout) -->
+    <div class="cells" aria-hidden="true">
+      <div class="cell coronal"><span data-i18n="tile_coronal"></span></div>
+      <div class="cell sagittal"><span data-i18n="tile_sagittal"></span></div>
+      <div class="cell axial"><span data-i18n="tile_axial"></span></div>
+      <div class="cell render"><span data-i18n="tile_render"></span></div>
+    </div>
+    <canvas id="gl"></canvas>
+    <div class="empty" id="viewerEmpty" data-i18n="viewerEmpty"></div>
+    <div class="loc" id="loc"></div>
+  </section>
+
+  <aside class="panel" id="doctorRight">
+    <h2 data-i18n="results"></h2>
+    <p id="noResult" class="hint" data-i18n="noResult"></p>
+    <dl id="stats" hidden>
+      <div class="big"><dt data-i18n="volume"></dt><dd><span id="s_vol"></span> <small>mL</small></dd></div>
+      <div id="editedRow" hidden><dt data-i18n="aiOriginal"></dt><dd id="s_ai"></dd></div>
+      <div><dt data-i18n="lesions"></dt><dd id="s_n"></dd></div>
+      <div><dt data-i18n="hemisphere"></dt><dd id="s_hemi"></dd></div>
+      <div><dt data-i18n="left"></dt><dd id="s_l"></dd></div>
+      <div><dt data-i18n="right"></dt><dd id="s_r"></dd></div>
+      <div><dt data-i18n="modelUsed"></dt><dd id="s_model"></dd></div>
+      <div><dt data-i18n="time"></dt><dd id="s_time"></dd></div>
+      <div id="gtRows" hidden><dt data-i18n="gtVolume"></dt><dd id="s_gt"></dd></div>
+      <div id="diceRow" hidden><dt data-i18n="dice"></dt><dd id="s_dice"></dd></div>
+    </dl>
+    <p class="hint" data-i18n="hemiNote" style="margin-top:12px"></p>
+
+    <section id="regionBox" hidden style="margin-top:14px">
+      <h2 data-i18n="regionsTitle"></h2>
+      <table class="regions" id="regionTable"></table>
+      <p class="hint" id="regionHint"></p>
+    </section>
+
+    <section id="compareBox" hidden style="margin-top:14px">
+      <h2 data-i18n="compareTitle"></h2>
+      <table class="regions compare" id="compareTable"></table>
+      <button type="button" class="button" id="compareClear" data-i18n="compareClear"></button>
+    </section>
+
+    <section id="reviewBox" hidden style="margin-top:18px; padding-top:14px; border-top:1px solid var(--line)">
+      <h2 data-i18n="review"></h2>
+      <label><span data-i18n="noteLabel"></span><textarea id="note" rows="4"></textarea></label>
+      <label class="check"><input type="checkbox" id="showFunctions" checked> <span data-i18n="showFunctions"></span></label>
+      <p class="hint" data-i18n="approveHint"></p>
+      <button type="button" class="primary" id="approve" data-i18n="approve"></button>
+      <p class="approved" id="approvedInfo" hidden></p>
+      <button type="button" class="button" id="unapprove" hidden data-i18n="unapprove"></button>
+    </section>
+  </aside>
+
+  <aside class="panel patient-panel" id="patientPanel" hidden>
+    <h2 id="p_heading"></h2>
+    <p class="approved" id="p_approved"></p>
+    <h3 id="p_what_title"></h3>
+    <p id="p_what"></p>
+    <h3 id="p_summary_title"></h3>
+    <ul id="p_summary"></ul>
+    <div id="p_regions_box">
+      <h3 id="p_regions_title"></h3>
+      <ul id="p_regions"></ul>
+    </div>
+    <div id="p_note_box">
+      <h3 id="p_note_title"></h3>
+      <p class="note" id="p_note"></p>
+    </div>
+    <h3 id="p_limits_title"></h3>
+    <ul id="p_limits"></ul>
+    <h3 id="p_questions_title"></h3>
+    <ul id="p_questions"></ul>
+    <h3 data-i18n="views"></h3>
+    <div class="views">
+      <button type="button" data-view="left" data-i18n="viewLeft"></button>
+      <button type="button" data-view="right" data-i18n="viewRight"></button>
+      <button type="button" data-view="front" data-i18n="viewFront"></button>
+      <button type="button" data-view="top" data-i18n="viewTop"></button>
+    </div>
+    <button type="button" class="primary" id="exportPdf" data-i18n="exportPdf"></button>
+    <button type="button" class="button" id="backToDoctor" data-i18n="backToDoctor"></button>
+  </aside>
+</main>
+
+<dialog id="about" aria-labelledby="aboutTitle">
+  <h2 id="aboutTitle" data-i18n="about"></h2>
+  <div id="aboutBody"></div>
+  <form method="dialog"><button class="primary" data-i18n="close"></button></form>
+</dialog>
+
+<!-- Chỉ hiện khi in / lưu PDF -->
+<section id="report" aria-hidden="true"></section>
+
+<style>.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }</style>
+
+<script>
+const I18N = {
+  vi: {
+    title: "PBL6 · Phân đoạn tổn thương nhồi máu não",
+    subtitle: "Không gian làm việc của bác sĩ",
+    disclaimer: "Kết quả do AI tạo ra, chỉ để tham khảo. Không dùng thay cho chẩn đoán của bác sĩ.",
+    model: "Mô hình",
+    useFlair: "Dùng ảnh FLAIR",
+    flairRequired: "Mô hình này bắt buộc có FLAIR.",
+    flairOptional: "Mô hình này không cần FLAIR; FLAIR chỉ để hiển thị.",
+    input: "Dữ liệu đầu vào",
+    sampleCase: "Ca mẫu ISLES",
+    upload: "Tải file lên",
+    fileHint: "Chỉ nhận file .nii hoặc .nii.gz.",
+    run: "Chạy phân đoạn",
+    running: "Đang phân đoạn…",
+    loading: "Đang tải ảnh…",
+    loaded: "Đã tải ảnh. Bấm “Chạy phân đoạn”.",
+    done: "Xong sau {s} giây.",
+    display: "Hiển thị",
+    background: "Ảnh nền",
+    showMask: "Hiện vùng AI khoanh",
+    opacity: "Độ đậm của vùng khoanh",
+    download: "Tải mask (.nii.gz)",
+    viewerEmpty: "Chọn một ca mẫu hoặc tải file lên để xem ảnh.",
+    results: "Kết quả định lượng",
+    noResult: "Chưa có kết quả. Chọn ca rồi bấm “Chạy phân đoạn”.",
+    volume: "Thể tích tổn thương",
+    lesions: "Số ổ tổn thương",
+    hemisphere: "Vị trí",
+    left: "Bán cầu trái",
+    right: "Bán cầu phải",
+    modelUsed: "Mô hình",
+    time: "Thời gian xử lý",
+    hemi_left: "Bán cầu trái",
+    hemi_right: "Bán cầu phải",
+    hemi_both: "Cả hai bán cầu",
+    hemi_none: "Không phát hiện",
+    seconds: "{s} giây",
+    hemiNote: "Trái/phải là phía của bệnh nhân, tính xấp xỉ so với đường giữa não.",
+    modelMissing: "chưa có trọng số trên máy",
+    compareTitle: "So sánh các lần chạy",
+    compareClear: "Xóa bảng so sánh",
+    compareHead: "Ca|Mô hình|Dice|mL|giây",
+    tile_axial: "Mặt cắt ngang · Axial",
+    tile_coronal: "Mặt cắt đứng ngang · Coronal",
+    tile_sagittal: "Mặt cắt đứng dọc · Sagittal",
+    tile_render: "Không gian 3D",
+    regionsTitle: "Vùng não (theo atlas)",
+    regionNote: "Ước lượng bằng cách đăng ký affine atlas MNI (FSL) vào ảnh DWI, chỉ đúng ở mức thùy não; chưa đo được độ chính xác. Độ khớp mặt nạ não: {fit}.",
+    regionLowFit: "Độ khớp thấp (< 0,8): phần vùng não sẽ không hiện cho bệnh nhân.",
+    regionOutside: "Ngoài não (theo atlas)",
+    showFunctions: "Cho bệnh nhân xem câu giải thích chức năng của vùng não",
+    errBadExt: "{name}: chỉ nhận file .nii hoặc .nii.gz.",
+    errMissing: "Còn thiếu: {list}.",
+    errServer: "Lỗi: {msg}",
+    errLoad: "Không đọc được ảnh: {msg}",
+    errNoServer: "Không kết nối được server.",
+    errNoLib: "Không tải được thư viện hiển thị NiiVue.",
+    modeDoctor: "Bác sĩ",
+    modePatient: "Bệnh nhân",
+    patientLocked: "Cần bác sĩ duyệt kết quả trước khi mở chế độ bệnh nhân.",
+    radiological: "Quy ước chẩn đoán hình ảnh (trái màn hình = phải bệnh nhân)",
+    review: "Duyệt kết quả",
+    noteLabel: "Ghi chú cho bệnh nhân (tuỳ chọn)",
+    approveHint: "Chỉ sau khi duyệt, bệnh nhân mới xem được kết quả.",
+    approve: "Duyệt và mở chế độ bệnh nhân",
+    unapprove: "Hủy duyệt để chỉnh sửa",
+    approvedAt: "✓ Đã duyệt lúc {time}",
+    editTitle: "Chỉnh sửa vùng khoanh",
+    editStart: "Sửa vùng khoanh",
+    toolDraw: "Cọ thêm",
+    toolErase: "Tẩy",
+    penSize: "Cỡ cọ (voxel)",
+    editUndo: "Hoàn tác",
+    editReset: "Về lại bản AI",
+    editHint: "Kéo chuột trên ba mặt cắt để tô hoặc tẩy. Khi đang sửa, ảnh nền cố định là DWI.",
+    editLive: "Thể tích hiện tại (chưa lưu): {v} mL",
+    editSave: "Lưu chỉnh sửa",
+    editCancel: "Hủy, giữ bản trước",
+    editSaved: "Đã lưu chỉnh sửa.",
+    editLocked: "Hủy duyệt trước khi chỉnh sửa.",
+    errEdit: "Không mở được chế độ chỉnh sửa.",
+    aiOriginal: "AI khoanh ban đầu",
+    editedBy: "Đã được bác sĩ chỉnh sửa",
+    maskSource: "Vùng khoanh",
+    maskAi: "Do AI khoanh, chưa chỉnh sửa",
+    views: "Góc nhìn",
+    viewLeft: "Bên trái",
+    viewRight: "Bên phải",
+    viewFront: "Phía trước",
+    viewTop: "Từ trên",
+    exportPdf: "Xuất báo cáo PDF",
+    backToDoctor: "Quay lại màn hình bác sĩ",
+    errNoText: "Không tải được nội dung giải thích cho bệnh nhân.",
+    reportTitle: "Báo cáo phân đoạn tổn thương nhồi máu não trên MRI",
+    reportCase: "Ca",
+    reportCreated: "Ngày tạo",
+    reportMetrics: "Chỉ số định lượng",
+    reportImages: "Hình ảnh",
+    groupFeatured: "Ca tiêu biểu",
+    groupAll: "Tất cả ca",
+    showGt: "So sánh với nhãn chuyên gia",
+    gtLegend: "Đỏ: chỉ AI khoanh · Xanh lá: chỉ chuyên gia khoanh (AI bỏ sót) · Cam: cả hai cùng khoanh.",
+    gtVolume: "Thể tích theo chuyên gia",
+    dice: "Độ trùng khớp với chuyên gia (Dice)",
+    about: "Về mô hình",
+    close: "Đóng",
+    aboutArch: "Kiến trúc",
+    aboutInputs: "Kênh đầu vào",
+    aboutCkpt: "Số checkpoint",
+    aboutEnsemble: "{n} (lấy trung bình, ensemble)",
+    aboutMetrics: "Kết quả đánh giá",
+    aboutNoMetrics: "Chưa khai báo kết quả đánh giá cho mô hình này.",
+    aboutSource: "Nguồn: {src}",
+    m_dice: "Dice ↑ (độ trùng khớp, tối đa 1)",
+    m_hd95_mm: "HD95 (mm) ↓ (lệch đường biên)",
+    m_avd_ml: "Sai lệch thể tích (mL) ↓",
+    m_lcd: "Sai lệch số ổ ↓",
+    m_lesion_f1: "F1 theo ổ ↑ (phát hiện từng ổ)",
+    aboutData: "Dữ liệu",
+    aboutDataText: "ISLES 2022: 250 ca MRI đột quỵ thiếu máu não cấp từ nhiều trung tâm, có nhãn tổn thương do chuyên gia khoanh. Kết quả đánh giá được tính trên phần dữ liệu model không dùng khi huấn luyện (kiểm định chéo 5 phần).",
+    aboutLimits: "Giới hạn",
+    aboutLimitsText: "Model chỉ được huấn luyện trên ảnh ISLES đã tách sọ; ảnh từ máy chụp khác hoặc chưa tách sọ có thể cho kết quả kém. Model yếu hơn với tổn thương rất nhỏ. Đây là công cụ hỗ trợ tham khảo, không phải thiết bị y tế.",
+    reportSlices: "Ba mặt cắt qua tổn thương",
+    report3d: "Mô hình 3D",
+  },
+  en: {
+    title: "PBL6 · Ischemic Stroke Lesion Segmentation",
+    subtitle: "Clinician workspace",
+    disclaimer: "AI-generated result for reference only. Not a substitute for a physician's diagnosis.",
+    model: "Model",
+    useFlair: "Use FLAIR image",
+    flairRequired: "This model requires FLAIR.",
+    flairOptional: "This model does not need FLAIR; FLAIR is for display only.",
+    input: "Input data",
+    sampleCase: "ISLES sample",
+    upload: "Upload files",
+    fileHint: "Only .nii or .nii.gz files are accepted.",
+    run: "Run segmentation",
+    running: "Segmenting…",
+    loading: "Loading images…",
+    loaded: "Images loaded. Click “Run segmentation”.",
+    done: "Done in {s} s.",
+    display: "Display",
+    background: "Background image",
+    showMask: "Show AI lesion mask",
+    opacity: "Mask opacity",
+    download: "Download mask (.nii.gz)",
+    viewerEmpty: "Pick a sample case or upload files to view images.",
+    results: "Quantitative results",
+    noResult: "No result yet. Pick a case and click “Run segmentation”.",
+    volume: "Lesion volume",
+    lesions: "Lesion count",
+    hemisphere: "Location",
+    left: "Left hemisphere",
+    right: "Right hemisphere",
+    modelUsed: "Model",
+    time: "Processing time",
+    hemi_left: "Left hemisphere",
+    hemi_right: "Right hemisphere",
+    hemi_both: "Both hemispheres",
+    hemi_none: "None detected",
+    seconds: "{s} s",
+    hemiNote: "Left/right refers to the patient's side, approximated against the brain midline.",
+    modelMissing: "weights not on this machine",
+    compareTitle: "Run comparison",
+    compareClear: "Clear comparison",
+    compareHead: "Case|Model|Dice|mL|s",
+    tile_axial: "Axial",
+    tile_coronal: "Coronal",
+    tile_sagittal: "Sagittal",
+    tile_render: "3D view",
+    regionsTitle: "Brain regions (atlas)",
+    regionNote: "Estimated by affine registration of the MNI atlas (FSL) to the DWI; valid at lobe level only, accuracy not measured. Brain-mask fit: {fit}.",
+    regionLowFit: "Low fit (< 0.8): brain regions will not be shown to the patient.",
+    regionOutside: "Outside the brain (atlas)",
+    showFunctions: "Show the patient what each brain region usually does",
+    errBadExt: "{name}: only .nii or .nii.gz files are accepted.",
+    errMissing: "Missing: {list}.",
+    errServer: "Error: {msg}",
+    errLoad: "Could not read image: {msg}",
+    errNoServer: "Cannot reach the server.",
+    errNoLib: "Could not load the NiiVue viewer library.",
+    modeDoctor: "Clinician",
+    modePatient: "Patient",
+    patientLocked: "A clinician must approve the result before patient mode opens.",
+    radiological: "Radiological convention (screen left = patient right)",
+    review: "Review",
+    noteLabel: "Note for the patient (optional)",
+    approveHint: "The patient can only see the result after approval.",
+    approve: "Approve and open patient mode",
+    unapprove: "Withdraw approval to edit",
+    approvedAt: "✓ Approved at {time}",
+    editTitle: "Edit lesion mask",
+    editStart: "Edit mask",
+    toolDraw: "Brush",
+    toolErase: "Eraser",
+    penSize: "Brush size (voxels)",
+    editUndo: "Undo",
+    editReset: "Back to AI version",
+    editHint: "Drag on the three planes to paint or erase. While editing, the background is fixed to DWI.",
+    editLive: "Current volume (unsaved): {v} mL",
+    editSave: "Save edits",
+    editCancel: "Cancel, keep previous",
+    editSaved: "Edits saved.",
+    editLocked: "Withdraw approval before editing.",
+    errEdit: "Could not start editing.",
+    aiOriginal: "Original AI volume",
+    editedBy: "Edited by clinician",
+    maskSource: "Lesion mask",
+    maskAi: "AI-generated, not edited",
+    views: "View",
+    viewLeft: "Left",
+    viewRight: "Right",
+    viewFront: "Front",
+    viewTop: "Top",
+    exportPdf: "Export PDF report",
+    backToDoctor: "Back to clinician view",
+    errNoText: "Could not load the patient explanation text.",
+    reportTitle: "MRI Ischemic Stroke Lesion Segmentation Report",
+    reportCase: "Case",
+    reportCreated: "Created",
+    reportMetrics: "Quantitative results",
+    reportImages: "Images",
+    groupFeatured: "Featured cases",
+    groupAll: "All cases",
+    showGt: "Compare with expert label",
+    gtLegend: "Red: AI only · Green: expert only (missed by AI) · Orange: both agree.",
+    gtVolume: "Expert-labelled volume",
+    dice: "Agreement with expert (Dice)",
+    about: "About the model",
+    close: "Close",
+    aboutArch: "Architecture",
+    aboutInputs: "Input channels",
+    aboutCkpt: "Checkpoints",
+    aboutEnsemble: "{n} (averaged ensemble)",
+    aboutMetrics: "Evaluation results",
+    aboutNoMetrics: "No evaluation results declared for this model.",
+    aboutSource: "Source: {src}",
+    m_dice: "Dice ↑ (overlap, max 1)",
+    m_hd95_mm: "HD95 (mm) ↓ (boundary distance)",
+    m_avd_ml: "Volume difference (mL) ↓",
+    m_lcd: "Lesion count difference ↓",
+    m_lesion_f1: "Lesion-wise F1 ↑ (per-lesion detection)",
+    aboutData: "Data",
+    aboutDataText: "ISLES 2022: 250 multi-centre MRI scans of acute ischemic stroke with expert lesion labels. Evaluation results are computed on data the model did not train on (5-fold cross-validation).",
+    aboutLimits: "Limitations",
+    aboutLimitsText: "The model was trained only on skull-stripped ISLES images; scans from other scanners or without skull stripping may give poor results. It is weaker on very small lesions. This is a reference tool, not a medical device.",
+    reportSlices: "Three planes through the lesion",
+    report3d: "3D model",
+  },
+};
+
+const $ = (id) => document.getElementById(id);
+const MODS = ["dwi", "adc", "flair"];
+
+let lang = "vi";
+try { lang = localStorage.getItem("pbl6-lang") || "vi"; } catch {}
+if (!I18N[lang]) lang = "vi";
+
+// Số được định dạng lúc hiển thị để đổi ngôn ngữ thì dấu thập phân đổi theo
+const t = (key, vars = {}) => (I18N[lang][key] ?? key).replace(/\{(\w+)\}/g, (_, k) =>
+  typeof vars[k] === "number" ? fmt(vars[k], 1) : vars[k] ?? "");
+
+let models = [];
+let cases = [];
+let source = "sample";
+let imgs = {};          // NVImage theo kênh + "mask"
+let files = {};         // File người dùng chọn
+let result = null;      // JSON trả về từ /api/predict
+let status = null;      // {key, vars, error} để dịch lại khi đổi ngôn ngữ
+let loadToken = 0;      // bỏ kết quả tải cũ khi người dùng đổi ca giữa chừng
+let mode = "doctor";    // "doctor" | "patient"
+let approved = null;    // {time: Date} sau khi bác sĩ duyệt; mất khi kết quả đổi
+let patientText = null; // nội dung từ patient_text.json
+let editing = false;    // đang sửa mask bằng lớp vẽ của NiiVue
+
+const GLASS_OPACITY = 0.4;  // độ trong của não ở chế độ bệnh nhân, chọn sau khi thử 0.12–1
+const GT_OPACITY = 0.5;
+const VIEWS = { left: [90, 10], right: [270, 10], front: [180, 10], top: [0, 90] };  // [azimuth, elevation] của NiiVue
+
+function setStatus(key, vars = {}, error = false) {
+  status = key ? { key, vars, error } : null;
+  renderStatus();
+}
+function renderStatus() {
+  const el = $("status");
+  el.textContent = status ? t(status.key, status.vars) : "";
+  el.classList.toggle("error", !!status?.error);
+}
+
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-lang]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.lang === lang)));
+  renderStatus();
+  renderFlairUI();
+  renderResult();
+  renderPatient();
+  if (cases.length) renderCaseOptions();
+  renderAbout();
+}
+
+// ---------- Bố cục 4 ô của viewer bác sĩ ----------
+// Khớp lưới .cells trong CSS: khe giữa ô, thanh tiêu đề và lề trong mỗi ô (px)
+const CELL_GAP = 10, CELL_HEAD = 31, CELL_PAD = 6;
+
+function gridLayout() {
+  const W = nv.canvas.clientWidth || 1, H = nv.canvas.clientHeight || 1;
+  const cw = (W - CELL_GAP) / 2, ch = (H - CELL_GAP) / 2;
+  return [[0, 0, nv.sliceTypeCoronal], [1, 0, nv.sliceTypeSagittal], [0, 1, nv.sliceTypeAxial], [1, 1, nv.sliceTypeRender]]
+    .map(([col, row, sliceType]) => {
+      const x = col * (cw + CELL_GAP) + CELL_PAD, y = row * (ch + CELL_GAP) + CELL_HEAD;
+      return { sliceType, position: [x / W, y / H, (cw - 2 * CELL_PAD) / W, (ch - CELL_HEAD - CELL_PAD) / H] };
+    });
+}
+
+const currentModel = () => models.find((m) => m.name === $("model").value);
+const flairRequired = () => !!currentModel()?.requires.includes("flair");
+const flairOn = () => $("useFlair").checked;
+
+function renderCaseOptions() {
+  const keep = $("case").value;
+  const label = (c) => c.case_id.replace("sub-strokecase", "") + " · " + c.featured[lang];
+  const featured = cases.filter((c) => c.featured).sort((a, b) => a.featured_order - b.featured_order);
+  const groups = [];
+  if (featured.length) {
+    const g = document.createElement("optgroup");
+    g.label = t("groupFeatured");
+    g.append(...featured.map((c) => new Option(label(c), c.case_id)));
+    groups.push(g);
+  }
+  const all = document.createElement("optgroup");
+  all.label = t("groupAll");
+  all.append(...cases.map((c) => new Option(c.case_id, c.case_id)));
+  groups.push(all);
+  $("case").replaceChildren(...groups);
+  if (keep) $("case").value = keep;
+  renderGtUI();
+}
+
+function renderFlairUI() {
+  const required = flairRequired();
+  if (required) $("useFlair").checked = true;
+  $("useFlair").disabled = required;
+  $("flairHint").textContent = currentModel() ? t(required ? "flairRequired" : "flairOptional") : "";
+  const note = currentModel()?.note;
+  $("modelNote").hidden = !note;
+  $("modelNote").textContent = note?.[lang] ?? "";
+  $("flairRow").hidden = !flairOn();
+  const flairRadio = document.querySelector('input[name="bg"][value="flair"]');
+  flairRadio.disabled = editing || !(flairOn() && imgs.flair);
+  document.querySelectorAll('input[name="bg"]:not([value="flair"])').forEach((r) => { r.disabled = editing; });
+}
+
+const fmt = (x, digits = 2, min = 0) => Number(x).toLocaleString(lang === "vi" ? "vi-VN" : "en-US", { minimumFractionDigits: min, maximumFractionDigits: digits });
+
+// Các lần chạy AI trong phiên (chỉ trên trình duyệt), để đặt các model cạnh nhau trên cùng ca
+let runs = [];
+
+function renderCompare() {
+  $("compareBox").hidden = !runs.length;
+  if (!runs.length) return;
+  const head = document.createElement("tr");
+  head.append(...t("compareHead").split("|").map((h) => el("th", h)));
+  const rows = [...runs].sort((a, b) => a.case.localeCompare(b.case) || (b.dice ?? -1) - (a.dice ?? -1)).map((r) => {
+    const tr = document.createElement("tr");
+    if (r.job_id === result?.job_id) tr.className = "current";
+    tr.append(el("td", r.case.replace("sub-strokecase", "")), el("td", models.find((m) => m.name === r.model)?.label ?? r.model),
+      el("td", r.dice == null ? "–" : fmt(r.dice, 3, 3)), el("td", fmt(r.volume, 1, 1)), el("td", fmt(r.seconds, 1)));
+    return tr;
+  });
+  $("compareTable").replaceChildren(head, ...rows);
+}
+
+function renderResult() {
+  renderCompare();
+  $("stats").hidden = !result;
+  $("noResult").hidden = !!result;
+  const dl = $("download");
+  dl.setAttribute("aria-disabled", String(!result));
+  if (result) dl.href = result.mask_url; else dl.removeAttribute("href");
+  dl.download = result?.edited ? "edited_mask.nii.gz" : "predicted_mask.nii.gz";
+  renderReview();
+  renderEditUI();
+  if (!result) return;
+  $("s_vol").textContent = fmt(result.volume_ml);
+  $("editedRow").hidden = !result.edited;
+  if (result.edited) $("s_ai").textContent = fmt(result.ai.volume_ml) + " mL";
+  $("s_n").textContent = result.lesion_count;
+  $("s_hemi").textContent = t("hemi_" + result.hemisphere);
+  $("s_l").textContent = fmt(result.left_ml) + " mL";
+  $("s_r").textContent = fmt(result.right_ml) + " mL";
+  $("s_model").textContent = models.find((m) => m.name === result.model)?.label ?? result.model;
+  $("s_time").textContent = t("seconds", { s: result.seconds });
+  const gt = result.ground_truth;
+  $("gtRows").hidden = $("diceRow").hidden = !gt;
+  if (gt) {
+    $("s_gt").textContent = fmt(gt.volume_ml) + " mL";
+    $("s_dice").textContent = fmt(gt.dice, 2, 2);
+  }
+  renderRegions();
+}
+
+// ---------- Viewer ----------
+let nv = null;
+
+function selectedBg() {
+  let bg = document.querySelector('input[name="bg"]:checked').value;
+  if (!imgs[bg] || (bg === "flair" && !flairOn())) {
+    bg = MODS.find((m) => imgs[m] && (m !== "flair" || flairOn())) || "dwi";
+    document.querySelector(`input[name="bg"][value="${bg}"]`).checked = true;
+  }
+  return bg;
+}
+
+// Ảnh ISLES thường chụp nghiêng vài độ; NiiVue vẽ lát cắt theo không gian mm nên phải ép quy đổi theo mm
+const mmToFrac = (mm) => nv.mm2frac(mm, 0, true);
+
+function refreshViewer() {
+  renderFlairUI();
+  if (!nv) return;
+  const back = imgs[selectedBg()];
+  $("viewerEmpty").hidden = !!back;
+  if (!back) {
+    while (nv.volumes.length) nv.removeVolume(nv.volumes[0]);
+    $("loc").textContent = "";
+    return;
+  }
+  // Crosshair lưu theo tỉ lệ của ảnh nền; giữ đúng vị trí mm khi đổi sang ảnh có vùng chụp khác (FLAIR)
+  const keepMM = nv.volumes.length && nv.volumes[0] !== back ? nv.frac2mm(nv.scene.crosshairPos, 0, true) : null;
+  // setVolume cập nhật luôn ảnh nền/lớp phủ nội bộ của NiiVue; gán volumes thôi là chưa đủ
+  // Nhãn chuyên gia nằm dưới vùng AI: chỉ chuyên gia = xanh, chỉ AI = đỏ, trùng nhau = màu pha
+  nv.volumes = [back, gtVisible() ? imgs.gt : null, imgs.mask].filter(Boolean);
+  nv.setVolume(back, 0);
+  if (keepMM) {
+    nv.scene.crosshairPos = mmToFrac([keepMM[0], keepMM[1], keepMM[2]]);
+    nv.drawScene();
+  }
+  applyLook();
+}
+
+// Cách hiển thị theo chế độ: bác sĩ = 3 mặt cắt + 3D; bệnh nhân = chỉ 3D, não trong suốt, không crosshair
+// Nhãn chuyên gia chỉ dành cho bác sĩ, không hiện ở chế độ bệnh nhân
+const gtVisible = () => mode === "doctor" && $("showGt").checked && !!imgs.gt;
+
+function applyMaskOpacity() {
+  $("opVal").textContent = $("opacity").value + "%";
+  const i = nv && imgs.mask ? nv.volumes.indexOf(imgs.mask) : -1;
+  const shown = $("showMask").checked ? $("opacity").value / 100 : 0;
+  if (i > 0) nv.setOpacity(i, mode === "patient" ? 1 : editing ? 0 : shown);
+  if (editing) nv.setDrawOpacity(shown);
+}
+
+function currentCase() {
+  return source === "sample" ? cases.find((x) => x.case_id === $("case").value) : null;
+}
+
+async function onShowGtChange() {
+  $("gtLegend").hidden = !$("showGt").checked;
+  const c = currentCase();
+  if ($("showGt").checked && !imgs.gt && c?.ground_truth && nv) {
+    const token = loadToken;
+    try {
+      const gt = await niivue.NVImage.loadFromUrl({ url: c.ground_truth, colormap: "green" });
+      if (token !== loadToken) return;
+      imgs.gt = gt;
+    } catch (e) {
+      setStatus("errLoad", { msg: e.message || e }, true);
+    }
+  }
+  refreshViewer();
+}
+
+function renderGtUI() {
+  const c = currentCase();
+  $("showGt").disabled = !c?.ground_truth;
+  if (!c?.ground_truth) $("showGt").checked = false;
+  $("gtLegend").hidden = !$("showGt").checked;
+}
+
+function applyLook() {
+  if (!nv || !nv.volumes.length) return;
+  const patient = mode === "patient";
+  nv.opts.show3Dcrosshair = !patient;
+  nv.setCrosshairWidth(patient ? 0 : 0.75);
+  nv.setRadiologicalConvention($("radiological").checked);
+  nv.setOpacity(0, patient ? GLASS_OPACITY : 1);
+  applyMaskOpacity();
+  if (imgs.gt && nv.volumes.includes(imgs.gt)) nv.setOpacity(nv.volumes.indexOf(imgs.gt), GT_OPACITY);
+  nv.setSliceType(patient ? nv.sliceTypeRender : nv.sliceTypeMultiplanar);
+  if (patient) nv.clearCustomLayout(); else nv.setCustomLayout(gridLayout());
+}
+
+function clearResult() {
+  if (editing) stopEdit();
+  imgs.aiMask = null;
+  result = null;
+  imgs.mask = null;
+  approved = null;
+  $("note").value = "";
+  $("showFunctions").checked = true;
+  if (mode === "patient") setMode("doctor");
+  renderResult();
+}
+
+// ---------- Chỉnh sửa mask ----------
+function renderEditUI() {
+  const canEdit = !!result && mode === "doctor" && !!nv;
+  $("editSection").hidden = !canEdit;
+  $("editStart").hidden = editing;
+  $("editStart").disabled = !!approved;
+  $("editStart").title = approved ? t("editLocked") : "";
+  $("editTools").hidden = !editing;
+  renderEditLive();
+}
+
+function renderEditLive() {
+  if (!editing || !nv.drawBitmap) { $("editLive").textContent = ""; return; }
+  let n = 0;
+  for (const v of nv.drawBitmap) if (v) n++;
+  const voxelMl = result.voxel_spacing_mm.reduce((a, b) => a * b, 1) / 1000;
+  $("editLive").textContent = t("editLive", { v: n * voxelMl });
+}
+
+function applyTool() {
+  const erase = document.querySelector('input[name="tool"]:checked').value === "erase";
+  nv.setPenValue(erase ? 0 : 1, false);
+  nv.opts.penSize = Number($("penSize").value);
+  $("penVal").textContent = $("penSize").value;
+}
+
+function startEdit() {
+  if (!result || approved || editing) return;
+  // Lớp vẽ phải cùng lưới với ảnh nền; mask nằm trên lưới DWI
+  document.querySelector('input[name="bg"][value="dwi"]').checked = true;
+  editing = true;
+  refreshViewer();
+  if (!nv.loadDrawing(imgs.mask)) {
+    editing = false;
+    refreshViewer();
+    setStatus("errEdit", {}, true);
+    return;
+  }
+  nv.setDrawingEnabled(true);
+  applyTool();
+  applyMaskOpacity();
+  renderReview();
+  renderEditUI();
+}
+
+function stopEdit() {
+  editing = false;
+  nv.setDrawingEnabled(false);
+  nv.closeDrawing();
+  refreshViewer();
+  renderReview();
+  renderEditUI();
+}
+
+async function saveEdit() {
+  const token = loadToken;
+  $("editSave").disabled = true;
+  try {
+    const bytes = await nv.saveImage({ filename: "", isSaveDrawing: true, volumeByIndex: 0 });
+    const form = new FormData();
+    form.append("mask", new Blob([bytes]), "edited.nii");
+    let res;
+    try {
+      res = await fetch(`/api/results/${result.job_id}/edited`, { method: "POST", body: form });
+    } catch {
+      setStatus("errNoServer", {}, true);
+      return;
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatus("errServer", { msg: body.detail || res.statusText }, true); return; }
+    // Thêm tham số để trình duyệt không dùng lại bản cũ trong bộ nhớ đệm
+    const mask = await niivue.NVImage.loadFromUrl({ url: body.mask_url + "?v=" + Date.now(), name: "edited_mask.nii.gz", colormap: "red" });
+    if (token !== loadToken || !result) return;
+    imgs.mask = mask;
+    result = { ...result, ...body, edited: true, ai: result.ai ?? { volume_ml: result.volume_ml, lesion_count: result.lesion_count } };
+    stopEdit();
+    renderResult();
+    setStatus("editSaved");
+  } catch (e) {
+    setStatus("errLoad", { msg: e.message || e }, true);
+  } finally {
+    $("editSave").disabled = false;
+  }
+}
+
+function resetToAi() {
+  if (editing && imgs.aiMask) {
+    nv.loadDrawing(imgs.aiMask);
+    renderEditLive();
+  }
+}
+
+// ---------- Duyệt và chế độ bệnh nhân ----------
+const fmtTime = (d) => d.toLocaleString(lang === "vi" ? "vi-VN" : "en-GB", { dateStyle: "short", timeStyle: "short" });
+const fill = (s, vars) => s.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "");
+
+function renderReview() {
+  $("reviewBox").hidden = !result;
+  $("approve").hidden = !!approved;
+  $("approve").disabled = editing;
+  $("unapprove").hidden = !approved;
+  $("approvedInfo").hidden = !approved;
+  $("note").disabled = $("showFunctions").disabled = !!approved;
+  if (approved) $("approvedInfo").textContent = t("approvedAt", { time: fmtTime(approved.time) });
+  $("modePatient").disabled = !approved;
+  $("modePatient").title = approved ? "" : t("patientLocked");
+}
+
+function patientSummary(P) {
+  if (!result.lesion_count) return [P.none];
+  return [
+    fill(P.volume, { volume: fmt(result.volume_ml, 1) }),
+    result.lesion_count === 1 ? P.count_one : fill(P.count_many, { count: result.lesion_count }),
+    P["side_" + result.hemisphere],
+    result.edited ? P.edited : null,
+  ].filter(Boolean);
+}
+
+// Ràng buộc mục 5.1 WEB_PLAN: chỉ nêu vùng chiếm đủ phần; ổ rất nhỏ hoặc rải giữa nhiều vùng thì chỉ nêu vị trí
+// Ổ lớn trải nhiều thùy vẫn nêu chức năng từng thùy, vì xét thể tích của từng vùng chứ không xét tổng
+const REGION_MIN_SHARE = 0.15, FUNCTION_MIN_SHARE = 0.2, FUNCTION_MIN_ML = 0.5, ATLAS_MIN_FIT = 0.8;
+
+function regionLabel(r) {
+  const P = patientText?.[lang];
+  if (!r.region) return t("regionOutside");
+  if (!P) return r.region;
+  return r.side ? fill(P.region_with_side, { region: P.region_names[r.region], side: P.side_names[r.side] }) : P.region_names[r.region];
+}
+
+function patientRegions(P) {
+  const rows = (result.regions ?? []).filter((r) => r.region && r.share >= REGION_MIN_SHARE);
+  if (!rows.length || !(result.atlas_fit >= ATLAS_MIN_FIT)) return [];
+  const items = rows.map((r) => fill(P.region_share, { pct: Math.round(r.share * 100), region: regionLabel(r) }));
+  if ($("showFunctions").checked) {
+    const funcs = rows.filter((r) => r.ml >= FUNCTION_MIN_ML && r.share >= FUNCTION_MIN_SHARE);
+    items.push(...new Set(funcs.map((r) => P.region_functions[r.region])));
+    if (!funcs.length) items.push(P.region_unclear);
+  }
+  items.push(P.region_note);
+  return items;
+}
+
+function renderRegions() {
+  const regions = result?.regions;
+  $("regionBox").hidden = !regions?.length;
+  if (!regions?.length) return;
+  $("regionTable").replaceChildren(...regions.filter((r) => r.share >= 0.05).map((r) => {
+    const tr = document.createElement("tr");
+    tr.append(el("td", regionLabel(r)), el("td", fmt(r.ml) + " mL"), el("td", Math.round(r.share * 100) + "%"));
+    return tr;
+  }));
+  const fit = result.atlas_fit;
+  $("regionHint").textContent = t("regionNote", { fit: fmt(fit, 2, 2) }) + (fit < ATLAS_MIN_FIT ? " " + t("regionLowFit") : "");
+}
+
+function fillList(el, items) {
+  el.replaceChildren(...items.map((text) => Object.assign(document.createElement("li"), { textContent: text })));
+}
+
+function renderPatient() {
+  if (!patientText || !result || !approved) return;
+  const P = patientText[lang];
+  for (const k of ["heading", "what_title", "what", "summary_title", "note_title", "limits_title", "questions_title"]) {
+    $("p_" + k).textContent = P[k];
+  }
+  $("p_approved").textContent = fill(P.approved, { time: fmtTime(approved.time) });
+  fillList($("p_summary"), patientSummary(P));
+  const regionItems = patientRegions(P);
+  $("p_regions_box").hidden = !regionItems.length;
+  $("p_regions_title").textContent = P.regions_title;
+  fillList($("p_regions"), regionItems);
+  fillList($("p_limits"), P.limits);
+  fillList($("p_questions"), P.questions);
+  const note = $("note").value.trim();
+  $("p_note_box").hidden = !note;
+  $("p_note").textContent = note;
+}
+
+function renderAbout() {
+  const m = currentModel();
+  if (!m) return;
+  const row = (k, v) => { const tr = document.createElement("tr"); tr.append(el("td", k), el("td", v)); return tr; };
+  const info = el("table");
+  info.append(
+    row(t("model"), m.label),
+    row(t("aboutArch"), m.arch),
+    row(t("aboutInputs"), m.modalities.map((x) => x.toUpperCase()).join(" + ")),
+    row(t("aboutCkpt"), m.n_checkpoints > 1 ? t("aboutEnsemble", { n: String(m.n_checkpoints) }) : "1"),
+  );
+  const parts = [info, el("h3", t("aboutMetrics"))];
+  if (m.metrics && m.metrics.values) {
+    const tbl = el("table");
+    for (const [k, v] of Object.entries(m.metrics.values)) tbl.append(row(I18N[lang]["m_" + k] ?? k, fmt(v, 4)));
+    parts.push(tbl);
+    if (m.metrics.source) parts.push(el("p", t("aboutSource", { src: m.metrics.source }), "hint"));
+  } else {
+    parts.push(el("p", t("aboutNoMetrics"), "hint"));
+  }
+  parts.push(el("h3", t("aboutData")), el("p", t("aboutDataText")), el("h3", t("aboutLimits")), el("p", t("aboutLimitsText")));
+  $("aboutBody").replaceChildren(...parts);
+}
+
+function setView(name) {
+  if (nv) nv.setRenderAzimuthElevation(...VIEWS[name]);
+}
+
+function setMode(next) {
+  if (next === "patient" && !approved) return;
+  mode = next;
+  document.body.classList.toggle("patient", mode === "patient");
+  $("patientPanel").hidden = mode !== "patient";
+  $("modeDoctor").setAttribute("aria-selected", String(mode === "doctor"));
+  $("modePatient").setAttribute("aria-selected", String(mode === "patient"));
+  renderEditUI();
+  renderPatient();
+  if (!nv) return;
+  nv.resizeListener();  // khung canvas đổi kích thước theo bố cục mới
+  refreshViewer();
+  nv.setScale(mode === "patient" ? 1.3 : 1);
+  if (mode === "patient") setView(result?.hemisphere === "left" ? "left" : result?.hemisphere === "right" ? "right" : "top");
+}
+
+function approve() {
+  if (!result) return;
+  if (!patientText) { setStatus("errNoText", {}, true); return; }
+  approved = { time: new Date() };
+  renderReview();
+  setMode("patient");
+}
+
+function unapprove() {
+  approved = null;
+  setMode("doctor");
+  renderReview();
+}
+
+// ---------- Báo cáo PDF (in bằng trình duyệt) ----------
+function snapshot() {
+  nv.drawScene();
+  return nv.canvas.toDataURL("image/png");  // phải gọi ngay sau drawScene, trước khi trình duyệt xóa bộ đệm WebGL
+}
+
+function captureReportImages() {
+  const img3d = mode === "patient" ? snapshot() : null;
+  const saved = { pos: [...nv.scene.crosshairPos], layout: nv.opts.multiplanarLayout, render: nv.opts.multiplanarShowRender };
+  const prevMode = mode;
+  mode = "doctor";
+  applyLook();
+  nv.setCrosshairWidth(0);
+  nv.clearCustomLayout();  // báo cáo dùng bố cục hàng ngang của NiiVue; applyLook() cuối hàm dựng lại 4 ô
+  if (imgs.mask) nv.setOpacity(nv.volumes.indexOf(imgs.mask), 0.6);  // báo cáo luôn có vùng khoanh, kể cả khi bác sĩ đang tắt
+  if (imgs.gt && nv.volumes.includes(imgs.gt)) nv.setOpacity(nv.volumes.indexOf(imgs.gt), 0);
+  nv.opts.multiplanarShowRender = niivue.SHOW_RENDER.NEVER;
+  nv.opts.multiplanarLayout = niivue.MULTIPLANAR_TYPE.ROW;
+  if (result.focus_mm) nv.scene.crosshairPos = mmToFrac(result.focus_mm);
+  const slices = snapshot();
+  nv.opts.multiplanarShowRender = saved.render;
+  nv.opts.multiplanarLayout = saved.layout;
+  nv.scene.crosshairPos = saved.pos;
+  mode = prevMode;
+  applyLook();
+  return { slices, img3d };
+}
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text != null) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+function buildReport() {
+  const P = patientText[lang];
+  const { slices, img3d } = captureReportImages();
+  const meta = [
+    `${t("reportCase")}: ${result.case_label}`,
+    `${t("reportCreated")}: ${fmtTime(new Date())}`,
+    t("approvedAt", { time: fmtTime(approved.time) }),
+  ].join(" · ");
+
+  const table = el("table");
+  [
+    [t("volume"), fmt(result.volume_ml) + " mL"],
+    [t("lesions"), result.lesion_count],
+    [t("hemisphere"), t("hemi_" + result.hemisphere)],
+    [t("left"), fmt(result.left_ml) + " mL"],
+    [t("right"), fmt(result.right_ml) + " mL"],
+    [t("modelUsed"), models.find((m) => m.name === result.model)?.label ?? result.model],
+    [t("maskSource"), result.edited ? `${t("editedBy")} (${t("aiOriginal")}: ${fmt(result.ai.volume_ml)} mL)` : t("maskAi")],
+    ...(result.ground_truth ? [[t("gtVolume"), fmt(result.ground_truth.volume_ml) + " mL"], [t("dice"), fmt(result.ground_truth.dice, 2, 2)]] : []),
+  ].forEach(([k, v]) => { const tr = table.insertRow(); tr.insertCell().textContent = k; tr.insertCell().textContent = v; });
+
+  const figs = el("div", null, "imgs");
+  for (const [src, cap] of [[slices, t("reportSlices")], [img3d, t("report3d")]]) {
+    if (!src) continue;
+    const fig = el("figure");
+    fig.append(Object.assign(document.createElement("img"), { src, alt: cap }), el("figcaption", cap));
+    figs.append(fig);
+  }
+
+  const list = (items) => { const ul = el("ul"); fillList(ul, items); return ul; };
+  const note = $("note").value.trim();
+  $("report").replaceChildren(
+    el("h1", t("reportTitle")),
+    el("p", meta, "meta"),
+    el("p", t("disclaimer"), "warn"),
+    el("h2", t("reportMetrics")), table,
+    el("h2", t("reportImages")), figs,
+    el("h2", P.summary_title), list(patientSummary(P)),
+    ...(patientRegions(P).length ? [el("h2", P.regions_title), list(patientRegions(P))] : []),
+    el("h2", P.what_title), el("p", P.what),
+    ...(note ? [el("h2", P.note_title), el("p", note, "note")] : []),
+    el("h2", P.limits_title), list(P.limits),
+    el("h2", P.questions_title), list(P.questions),
+  );
+}
+
+function exportPdf() {
+  if (!result || !approved || !patientText || !nv) return;
+  buildReport();
+  window.print();
+}
+
+async function loadVolume(mod, loader) {
+  try {
+    return await loader();
+  } catch (e) {
+    throw new Error(`${mod.toUpperCase()}: ${e.message || e}`);
+  }
+}
+
+async function loadSample() {
+  const token = ++loadToken;
+  clearResult();
+  imgs = {};
+  refreshViewer();
+  const c = cases.find((x) => x.case_id === $("case").value);
+  renderGtUI();
+  if (!c || !nv) return;
+  setStatus("loading");
+  const wanted = MODS.filter((m) => c.files[m] && (m !== "flair" || flairOn()));
+  try {
+    const loaded = await Promise.all(wanted.map((m) =>
+      loadVolume(m, () => niivue.NVImage.loadFromUrl({ url: c.files[m], colormap: "gray" }))));
+    if (token !== loadToken) return;
+    wanted.forEach((m, i) => { imgs[m] = loaded[i]; });
+    refreshViewer();
+    if ($("showGt").checked) onShowGtChange();
+    setStatus("loaded");
+  } catch (e) {
+    if (token === loadToken) setStatus("errLoad", { msg: e.message }, true);
+  }
+}
+
+async function ensureSampleFlair() {
+  const c = cases.find((x) => x.case_id === $("case").value);
+  if (source !== "sample" || imgs.flair || !c?.files.flair || !nv) return;
+  const token = loadToken;
+  setStatus("loading");
+  try {
+    const img = await niivue.NVImage.loadFromUrl({ url: c.files.flair, colormap: "gray" });
+    if (token !== loadToken) return;
+    imgs.flair = img;
+    refreshViewer();
+    setStatus(null);
+  } catch (e) {
+    setStatus("errLoad", { msg: "FLAIR: " + (e.message || e) }, true);
+  }
+}
+
+const isNifti = (name) => /\.nii(\.gz)?$/i.test(name);
+
+async function onFileChosen(mod, input) {
+  const file = input.files[0];
+  clearResult();
+  delete files[mod];
+  delete imgs[mod];
+  if (file && !isNifti(file.name)) {
+    input.value = "";
+    refreshViewer();
+    setStatus("errBadExt", { name: mod.toUpperCase() }, true);
+    return;
+  }
+  if (!file) { refreshViewer(); return; }
+  files[mod] = file;
+  if (!nv) return;
+  const token = loadToken;
+  setStatus("loading");
+  try {
+    const img = await loadVolume(mod, () => niivue.NVImage.loadFromFile({ file, name: file.name, colormap: "gray" }));
+    if (token !== loadToken || files[mod] !== file) return;
+    imgs[mod] = img;
+    refreshViewer();
+    setStatus(null);
+  } catch (e) {
+    delete files[mod];
+    input.value = "";
+    refreshViewer();
+    setStatus("errLoad", { msg: e.message }, true);
+  }
+}
+
+function switchSource(next) {
+  if (next === source) return;
+  source = next;
+  $("tabSample").setAttribute("aria-selected", String(source === "sample"));
+  $("tabUpload").setAttribute("aria-selected", String(source === "upload"));
+  $("paneSample").hidden = source !== "sample";
+  $("paneUpload").hidden = source !== "upload";
+  renderGtUI();
+  loadToken++;
+  setStatus(null);
+  if (source === "sample") { loadSample(); return; }
+  // Hiện lại ảnh của các file đã chọn trước đó
+  clearResult();
+  imgs = {};
+  refreshViewer();
+  MODS.forEach((m) => { if (files[m]) onFileChosen(m, $("f_" + m)); });
+}
+
+async function runSegmentation() {
+  const model = currentModel();
+  if (!model) return;
+  const form = new FormData();
+  form.append("model", model.name);
+  if (source === "sample") {
+    form.append("case_id", $("case").value);
+  } else {
+    const missing = model.requires.filter((m) => !files[m]);
+    if (missing.length) {
+      setStatus("errMissing", { list: missing.map((m) => m.toUpperCase()).join(", ") }, true);
+      return;
+    }
+    model.requires.forEach((m) => form.append(m, files[m]));  // chỉ gửi kênh model cần
+  }
+
+  const token = loadToken;
+  $("run").disabled = true;
+  setStatus("running");
+  try {
+    let res;
+    try {
+      res = await fetch("/api/predict", { method: "POST", body: form });
+    } catch {
+      setStatus("errNoServer", {}, true);
+      return;
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setStatus("errServer", { msg: body.detail || res.statusText }, true);
+      return;
+    }
+    const mask = await niivue.NVImage.loadFromUrl({ url: body.mask_url, colormap: "red", opacity: $("opacity").value / 100 });
+    if (token !== loadToken) return;
+    imgs.mask = imgs.aiMask = mask;
+    result = { ...body, case_label: source === "sample" ? $("case").value : files.dwi.name };
+    runs.push({ job_id: body.job_id, case: result.case_label, model: body.model, dice: body.ground_truth?.dice, volume: body.volume_ml, seconds: body.seconds });
+    renderResult();
+    refreshViewer();
+    if (body.focus_mm) {
+      nv.scene.crosshairPos = mmToFrac(body.focus_mm);
+      nv.drawScene();
+    }
+    setStatus("done", { s: body.seconds });
+  } catch (e) {
+    setStatus("errLoad", { msg: e.message || e }, true);
+  } finally {
+    $("run").disabled = false;
+  }
+}
+
+// ---------- Khởi tạo ----------
+async function init() {
+  applyLang();
+
+  if (typeof niivue === "undefined") {
+    setStatus("errNoLib", {}, true);
+  } else {
+    nv = new niivue.Niivue({
+      backColor: [0, 0, 0, 0],  // trong suốt: nền đen do các ô .cells bên dưới vẽ
+      show3Dcrosshair: true,
+      crosshairColor: [1, 0.78, 0.25, 0.75],  // vàng hổ phách: nổi trên ảnh xám, khác đỏ của tổn thương
+      crosshairWidth: 0.75,
+      isColorbar: false,
+      dragAndDropEnabled: false,
+      multiplanarShowRender: niivue.SHOW_RENDER.ALWAYS,
+      multiplanarLayout: niivue.MULTIPLANAR_TYPE.GRID,
+    });
+    await nv.attachTo("gl");
+    nv.canvas.parentElement.style.backgroundColor = "";  // NiiVue tự tô đen khung chứa; để CSS quyết định (khe giữa 4 ô)
+    // Ô tính theo pixel nên phải dựng lại khi viewer đổi kích thước
+    new ResizeObserver(() => { if (nv.customLayout?.length) nv.setCustomLayout(gridLayout()); }).observe(nv.canvas);
+    nv.setSliceType(nv.sliceTypeMultiplanar);
+    nv.onLocationChange = (d) => { $("loc").textContent = d.string; };
+    nv.onDrawingChanged = () => renderEditLive();
+  }
+
+  document.querySelectorAll("[data-lang]").forEach((b) => b.addEventListener("click", () => {
+    lang = b.dataset.lang;
+    try { localStorage.setItem("pbl6-lang", lang); } catch {}
+    applyLang();
+  }));
+  $("tabSample").addEventListener("click", () => switchSource("sample"));
+  $("tabUpload").addEventListener("click", () => switchSource("upload"));
+  $("case").addEventListener("change", loadSample);
+  $("model").addEventListener("change", () => {
+    clearResult();
+    refreshViewer();
+    if (flairOn()) ensureSampleFlair();
+  });
+  $("useFlair").addEventListener("change", () => {
+    if (flairOn()) ensureSampleFlair();
+    refreshViewer();
+  });
+  MODS.forEach((m) => $("f_" + m).addEventListener("change", (e) => onFileChosen(m, e.target)));
+  document.querySelectorAll('input[name="bg"]').forEach((r) => r.addEventListener("change", refreshViewer));
+  $("showGt").addEventListener("change", onShowGtChange);
+  $("aboutBtn").addEventListener("click", () => { renderAbout(); $("about").showModal(); });
+  // Chỉ đổi độ đậm, không dựng lại cả cảnh
+  $("showMask").addEventListener("change", applyMaskOpacity);
+  $("opacity").addEventListener("input", applyMaskOpacity);
+  $("radiological").addEventListener("change", () => nv?.setRadiologicalConvention($("radiological").checked));
+  $("modeDoctor").addEventListener("click", () => setMode("doctor"));
+  $("modePatient").addEventListener("click", () => setMode("patient"));
+  $("backToDoctor").addEventListener("click", () => setMode("doctor"));
+  $("approve").addEventListener("click", approve);
+  $("unapprove").addEventListener("click", unapprove);
+  $("exportPdf").addEventListener("click", exportPdf);
+  $("compareClear").addEventListener("click", () => { runs = []; renderCompare(); });
+  $("editStart").addEventListener("click", startEdit);
+  $("editCancel").addEventListener("click", stopEdit);
+  $("editSave").addEventListener("click", saveEdit);
+  $("editUndo").addEventListener("click", () => { nv.drawUndo(); renderEditLive(); });
+  $("editReset").addEventListener("click", resetToAi);
+  $("penSize").addEventListener("input", applyTool);
+  document.querySelectorAll('input[name="tool"]').forEach((r) => r.addEventListener("change", applyTool));
+  document.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+  fetch("/patient_text.json")
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((j) => { patientText = j; })
+    .catch(() => setStatus("errNoText", {}, true));
+  $("run").addEventListener("click", runSegmentation);
+
+  try {
+    const [m, c] = await Promise.all([
+      fetch("/api/models").then((r) => r.json()),
+      fetch("/api/cases").then((r) => r.json()),
+    ]);
+    models = m.models;
+    cases = c;
+    $("model").replaceChildren(...models.map((x) => Object.assign(
+      new Option(x.available ? x.label : `${x.label} — ${t("modelMissing")}`, x.name, false, x.name === m.default),
+      { disabled: !x.available })));
+    renderCaseOptions();
+    $("useFlair").checked = flairRequired();
+    renderAbout();
+    if (!cases.length) switchSource("upload");
+  } catch {
+    setStatus("errNoServer", {}, true);
+    return;
+  }
+  refreshViewer();
+  if (source === "sample") loadSample();
+}
+
+init();
+</script>
+</body>
+</html>

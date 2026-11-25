@@ -48,3 +48,8 @@ experiments/runs/
 
 experiments/Kaggle/
 experiments/results/*.csv
+
+# Trọng số model ngoài (DeepISLES/Zenodo), không commit
+external/
+# Atlas FSL nhỏ (~75 KB) cần cho chức năng vùng não của web
+!web/atlas/*.nii.gz

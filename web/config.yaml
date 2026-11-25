@@ -1,0 +1,57 @@
+# Cấu hình web demo. Đổi model = thêm một mục dưới `models` rồi sửa `default_model`, sau đó khởi động lại server.
+#
+# Mỗi model:
+#   label        Tên hiển thị trên giao diện.
+#   arch         Tên kiến trúc truyền cho src.models.builder.get_model
+#                (segresnet | dual_segresnet | swin_unetr | mednext).
+#   modalities   Thứ tự kênh đầu vào, đúng như lúc train. Chọn từ: dwi, adc, flair, edwi.
+#   checkpoints  Một file = một model; nhiều file = ensemble (lấy trung bình xác suất).
+#   roi_size     Kích thước patch sliding window, đúng như lúc train.
+#   kwargs       Tham số thêm cho kiến trúc (vd. init_filters, fusion_mode).
+#   threshold    Ngưỡng xác suất để ra mask.
+#   min_lesion_ml  Bỏ các ổ nhỏ hơn mức này (mL). 0 = không lọc.
+
+data_dir: ISLES-2022          # nguồn ca mẫu cho demo
+default_model: segresnet_fold0
+
+# Ca hiện ở đầu danh sách khi demo. Chọn trong tập kiểm định fold 0 (model chưa thấy khi train).
+# Danh sách chọn theo kết quả của SegResNet fold 0 (Dice 0.23–0.91); đổi model thì nên chọn lại.
+featured_cases:
+  sub-strokecase0061: {vi: "Ổ rất nhỏ, bán cầu trái", en: "Very small lesion, left hemisphere"}
+  sub-strokecase0121: {vi: "Ổ nhỏ, bán cầu phải", en: "Small lesion, right hemisphere"}
+  sub-strokecase0020: {vi: "Cỡ vừa, bán cầu trái", en: "Medium lesion, left hemisphere"}
+  sub-strokecase0039: {vi: "Cỡ vừa, bán cầu phải", en: "Medium lesion, right hemisphere"}
+  sub-strokecase0201: {vi: "Ổ lớn, bán cầu phải", en: "Large lesion, right hemisphere"}
+  sub-strokecase0010: {vi: "Nhiều ổ rải rác hai bên", en: "Many scattered lesions, both sides"}
+  sub-strokecase0181: {vi: "Ca khó: model bỏ sót nhiều", en: "Hard case: model misses a lot"}
+
+models:
+  segresnet_fold0:
+    label: "SegResNet (DWI+ADC+FLAIR, fold 0)"
+    arch: segresnet
+    modalities: [dwi, adc, flair]
+    checkpoints:
+      - experiments/runs/segresnet_fold0_20260929_003648/best_metric_model.pth
+    roi_size: [96, 96, 32]
+    kwargs: {}
+    threshold: 0.5
+    min_lesion_ml: 0
+    # Hiện ở mục "Về mô hình". Khóa được hiểu: dice, hd95_mm, avd_ml, lcd, lesion_f1.
+    metrics:
+      source: "ISLES-2022, fold 0 validation (50 cases), best epoch 25/30"
+      values: {dice: 0.533}
+
+  # Mẫu cho DualEncoderSegResNet v4 — bỏ dấu # sau khi chép checkpoint về máy.
+  # dual_segresnet_v4:
+  #   label: "DualEncoderSegResNet v4 (DWI+ADC)"
+  #   arch: dual_segresnet
+  #   modalities: [dwi, adc]
+  #   checkpoints:
+  #     - experiments/runs/dual_segresnet_fold0_20261108_070024/best_metric_model.pth
+  #   roi_size: [96, 96, 64]
+  #   kwargs: {init_filters: 32, fusion_mode: bidirectional, deep_supervision: true}
+  #   threshold: 0.5
+  #   min_lesion_ml: 0.008
+  #   metrics:
+  #     source: "ISLES-2022, fold 0 validation (50 cases), with post-processing"
+  #     values: {dice: 0.7075, hd95_mm: 22.70, avd_ml: 2.69, lcd: 5.52, lesion_f1: 0.6331}

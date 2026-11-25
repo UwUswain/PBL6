@@ -44,6 +44,7 @@ pytz==2026.3.post1
 PyYAML==6.0.3
 pyzmq==27.2.0
 scipy==1.15.3
+SimpleITK==2.5.8
 seaborn==0.13.2
 six==1.17.0
 stack-data==0.6.3
@@ -55,3 +56,6 @@ traitlets==5.16.1
 typing_extensions==4.16.0
 tzdata==2026.3
 wcwidth==0.8.3
+fastapi==0.123.5
+uvicorn==0.38.0
+python-multipart==0.0.20
