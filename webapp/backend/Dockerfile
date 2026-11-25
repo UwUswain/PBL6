@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv/api
 
-RUN useradd --create-home --uid 1000 api
+RUN useradd --create-home --uid 1000 api && mkdir -p /srv/keys && chown api /srv/keys
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY . .

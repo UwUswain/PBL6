@@ -23,6 +23,11 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://pbl6:${POSTGRES_PASSWORD}@db:5432/pbl6
+      JWT_KEY_DIR: /srv/keys
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in webapp/.env}
+    volumes:
+      - jwtkeys:/srv/keys  # RSA signing key survives restarts, so sessions do too
     depends_on:
       db:
         condition: service_healthy
@@ -58,3 +63,4 @@ services:
 
 volumes:
   pgdata:
+  jwtkeys:

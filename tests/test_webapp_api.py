@@ -1,18 +1,13 @@
-"""Phase-7 platform API (webapp/backend). Runs against in-memory SQLite; Docker runs it on PostgreSQL."""
+"""Phase-7 platform API (webapp/backend): health endpoints. Runs on in-memory SQLite; Docker runs PostgreSQL."""
 
-import os
-from pathlib import Path
-import sys
 import unittest
 
-BACKEND = Path(__file__).resolve().parent.parent / "webapp" / "backend"
+from tests import webapp_env  # noqa: F401  (environment before importing app)
 
 
 class HealthTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ["DATABASE_URL"] = "sqlite://"
-        sys.path.insert(0, str(BACKEND))
         from fastapi.testclient import TestClient
 
         from app.main import app
