@@ -53,3 +53,8 @@ experiments/results/*.csv
 external/
 # Atlas FSL nhỏ (~75 KB) cần cho chức năng vùng não của web
 !web/atlas/*.nii.gz
+
+# Platform (webapp/) secrets and build output
+webapp/.env
+webapp/frontend/node_modules/
+webapp/frontend/dist/

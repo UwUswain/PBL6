@@ -1,0 +1,60 @@
+# PBL6 platform: one command from this folder:  docker compose up -d --build
+# Then open http://localhost:8080
+# Memory caps keep the laptop under ~90% RAM (16 GB machine shared with the IDE and browser).
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pbl6
+      POSTGRES_USER: pbl6
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in webapp/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pbl6 -d pbl6"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://pbl6:${POSTGRES_PASSWORD}@db:5432/pbl6
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"  # localhost only; the legacy web/ demo keeps port 8000
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    mem_limit: 4g
+    restart: "no"  # shortcut: M0 worker only runs the GPU check and exits; M2 makes it a long-running service
+
+volumes:
+  pgdata:

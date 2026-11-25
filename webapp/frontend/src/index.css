@@ -1,0 +1,21 @@
+/* Black-red palette, same tokens as the legacy web/ viewer (reference: rapidai.com colours). */
+:root {
+  --bg: #f0f2f5; --panel: #ffffff; --text: #141414; --muted: #555555; --line: #e2e5e9;
+  --accent: #ce0e2d; --accent-text: #ffffff; --ok: #2e7d32;
+  --header: #000000; --header-line: #ce0e2d;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0a0b; --panel: #151619; --text: #ededed; --muted: #9a9a9a; --line: #272d37;
+    --accent: #e0223f; --ok: #66bb6a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 Poppins, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+.topbar { background: var(--header); color: #fff; padding: 12px 16px; border-bottom: 3px solid var(--header-line); }
+.center { max-width: 640px; margin: 64px auto; padding: 0 16px; }
+.center h1 { font-size: 22px; }
+.status { padding: 10px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
+.status.ready { border-left: 4px solid var(--ok); }
+.status.down { border-left: 4px solid var(--accent); }
