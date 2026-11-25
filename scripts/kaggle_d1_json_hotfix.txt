@@ -1,0 +1,15 @@
+# Insert immediately AFTER: print("VERIFIED COMMIT:", head)
+# Applies exactly one missing standard-library import to the pinned checkout.
+train_file = REPO_DIR / "scripts/train.py"
+train_source = train_file.read_text(encoding="utf-8")
+if "import json" not in train_source.splitlines():
+    require(
+        train_source.count("import argparse\n") == 1,
+        "Unexpected train.py structure; refusing to patch.",
+    )
+    train_source = train_source.replace(
+        "import argparse\n", "import argparse\nimport json\n", 1
+    )
+    compile(train_source, str(train_file), "exec")
+    train_file.write_text(train_source, encoding="utf-8")
+print("D1 HOTFIX APPLIED: scripts/train.py imports json")
