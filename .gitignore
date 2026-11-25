@@ -48,3 +48,6 @@ experiments/runs/
 
 experiments/Kaggle/
 experiments/results/*.csv
+
+# Local scratch work
+/tmp/
