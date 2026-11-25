@@ -23,12 +23,16 @@
 | 25/11 | Giai đoạn 7 (tài khoản, quản lý, Docker): **phải làm mức sản phẩm, bắt buộc Docker khi bảo vệ**; chọn B hoặc C; đề xuất "C lõi" (≈ 16 ngày) | Xem [01_phase7_accounts_management_plan.md](01_phase7_accounts_management_plan.md) |
 | 25/11 | **Chốt giai đoạn 7:** C đầy đủ (JWT RS256 xoay vòng, Postgres, hàng đợi job, worker GPU, admin đầy đủ); **viết lại giao diện bằng React + Vite + TypeScript**; bảo vệ trên **laptop RTX 4060**; được sửa tiếp sau khi nộp. Tổng ≈ 25 ngày, chia: M0–M3 trước 15/12, M4 trong 16–30/12 | Nhóm muốn mức sản phẩm, chuẩn ngành; quỹ thời gian đến 30/12 đủ. Giữ viewer cũ song song tới khi bản React làm được đủ chức năng |
 | 25/11 | Ước lượng lại theo giờ làm việc cùng Claude Code: **≈ 24–39 giờ**, M0–M3 xong khoảng 2–4/12 nếu ngồi 4–6 giờ/ngày. Số 25 ngày trước đó là ngày công sinh viên tự code | Đơn vị cũ không đúng với cách làm thực tế |
+| 25/11 | Quy tắc máy: mọi thứ tải về để ở ổ D; RAM/CPU dưới 90%; không xóa gì ngoài dự án; muốn xóa trong dự án thì commit trước. Dữ liệu Docker chuyển sang `D:\DockerData`; `.wslconfig` giới hạn WSL ở 6 GB RAM và 8 CPU, file swap đặt ở `D:\WSL` | Laptop 16 GB hay lag; ổ C gần đầy |
+| 25/11 | **M0 xong:** `webapp/` gồm FastAPI + Alembic, React 19 + Vite 6 + TS 5.8, docker compose (postgres 16, api, nginx, worker); **worker trong Docker thấy RTX 4060** | Gỡ rủi ro lớn nhất (GPU trong Docker trên Windows) |
+| 25/11 | **M1 backend xong:** Argon2id, JWT RS256 10 phút kèm kiểm tra phiên trong DB, refresh token xoay vòng có phát hiện dùng lại, khóa tạm khi đăng nhập sai, bắt đổi mật khẩu lần đầu, admin quản lý tài khoản, nhật ký; kiểm tra trên PostgreSQL qua nginx | Chi tiết trong commit `b3bb08d` |
+| 25/11 | Cài skill **taste-skill** (`design-taste-frontend` 2.5.1, MIT) vào `D:\PBL6-test_model\.claude\skills` (ngoài repo). Chỉ dùng có chọn lọc: luật câu chữ, khả năng truy cập, hiệu năng, hover. Không áp luật kiểu trang quảng cáo (mỗi màn một section, ảnh stock, hiệu ứng shader) cho viewer và các trang nghiệp vụ | Skill viết cho website công ty/landing page; web của nhóm là ứng dụng y tế |
 | 25/11 | Khác biệt chính: **vai trò bệnh nhân** (dễ hiểu, tôn trọng tâm lý, có khu vực chờ để bệnh nhân bấm, khám phá); họ tên thật: quyết sau | Nhóm bạn không có vai trò này |
 
 ## 2. Việc đang dở
 
 - Tải gói trọng số DeepISLES: dừng ở 5,0/8,5 GB (tải tiếp được, có kiểm tra MD5), chưa giải nén. Sau đó thêm 3 mục vào `web/config.yaml` và chạy thử.
-- Giai đoạn 7: đã chốt; bắt đầu M0 (khung React, docker compose, kiểm tra GPU trong Docker).
+- Giai đoạn 7: M0 xong; M1 backend xong; đang làm M1 frontend (đăng nhập, đổi mật khẩu, khung theo vai trò, trang admin).
 - Khu vực chờ của bệnh nhân: chờ bàn nội dung.
 - Cải tiến viewer học từ nhóm bạn (phím tắt, nhảy lát có tổn thương, phóng to một ô): chưa làm.
 
