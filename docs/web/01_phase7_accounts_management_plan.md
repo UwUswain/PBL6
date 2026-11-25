@@ -26,6 +26,25 @@ C đầy đủ 19,5 ngày, cộng viết lại React khoảng 4 ngày, cộng g�
 | Dự phòng | 14–15/12 | Sửa lỗi, đóng băng, **nộp** | |
 | **M4** | 16–30/12 | Trang admin theo dõi job/worker và benchmark model; khu vực chờ bản 2; đưa NVAUTO/SEALS/Factorizer vào worker; CI; rà soát bảo mật; tập dượt trên laptop; ôn vấn đáp | |
 
+### Ước lượng khi làm cùng Claude Code (thực tế hơn)
+
+Các con số "ngày" ở trên là **ngày công của sinh viên tự viết code**, dùng cho báo cáo tiến độ. Khi Claude viết code và nhóm xem, duyệt, đơn vị đúng là **giờ làm việc**. Ước lượng dựa trên nhịp ngày 25/11: giai đoạn 6 mất ~1,5 giờ; chia 4 ô và đổi theme ~1 giờ; khung nhiều model ~1,5 giờ.
+
+| Mốc | Giờ làm việc |
+|---|---|
+| M0 | 2–4 giờ, cộng 30–60 phút tải ảnh Docker |
+| M1 | 4–6 giờ |
+| M2 | 6–9 giờ |
+| M3 | 6–10 giờ |
+| M4 | 6–10 giờ |
+| **Tổng** | **≈ 24–39 giờ**: khoảng 5–7 ngày nếu ngồi 4–6 giờ/ngày, tức M0–M3 xong khoảng **2–4/12** |
+
+Những thứ làm chậm mà không do viết code:
+- thời gian xem và duyệt của nhóm;
+- tải và build ảnh Docker;
+- lỗi môi trường Windows/WSL2/GPU;
+- giới hạn sử dụng Claude trong ngày, và cuộc trò chuyện dài bị tóm tắt (vì vậy mọi quyết định phải ghi vào `docs/web/`).
+
 **Rủi ro lớn nhất là chuyển viewer sang React** (hơn 1.400 dòng đang chạy). Phương án an toàn: **giữ viewer HTML cũ chạy song song** cho tới khi bản React làm được đủ mọi chức năng như bản cũ. Nếu đến 13/12 vẫn chưa đủ, bản nộp nhúng viewer cũ vào trang ca và tiếp tục chuyển trong đợt M4.
 
 ## 1. Vì sao làm

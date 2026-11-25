@@ -22,6 +22,7 @@
 | 25/11 | Tham khảo đồ án BraTS của nhóm bạn, chỉ đọc, lưu ngoài repo | Xem [02_reference_hwolp_brats_analysis.md](02_reference_hwolp_brats_analysis.md) |
 | 25/11 | Giai đoạn 7 (tài khoản, quản lý, Docker): **phải làm mức sản phẩm, bắt buộc Docker khi bảo vệ**; chọn B hoặc C; đề xuất "C lõi" (≈ 16 ngày) | Xem [01_phase7_accounts_management_plan.md](01_phase7_accounts_management_plan.md) |
 | 25/11 | **Chốt giai đoạn 7:** C đầy đủ (JWT RS256 xoay vòng, Postgres, hàng đợi job, worker GPU, admin đầy đủ); **viết lại giao diện bằng React + Vite + TypeScript**; bảo vệ trên **laptop RTX 4060**; được sửa tiếp sau khi nộp. Tổng ≈ 25 ngày, chia: M0–M3 trước 15/12, M4 trong 16–30/12 | Nhóm muốn mức sản phẩm, chuẩn ngành; quỹ thời gian đến 30/12 đủ. Giữ viewer cũ song song tới khi bản React làm được đủ chức năng |
+| 25/11 | Ước lượng lại theo giờ làm việc cùng Claude Code: **≈ 24–39 giờ**, M0–M3 xong khoảng 2–4/12 nếu ngồi 4–6 giờ/ngày. Số 25 ngày trước đó là ngày công sinh viên tự code | Đơn vị cũ không đúng với cách làm thực tế |
 | 25/11 | Khác biệt chính: **vai trò bệnh nhân** (dễ hiểu, tôn trọng tâm lý, có khu vực chờ để bệnh nhân bấm, khám phá); họ tên thật: quyết sau | Nhóm bạn không có vai trò này |
 
 ## 2. Việc đang dở
