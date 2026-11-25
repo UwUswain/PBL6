@@ -21,12 +21,13 @@
 | 25/11 | Git: nhánh **`web-demo`** (tách từ `long_exp`); commit `5a21547` (feat) và `65c5bef` (docs). Không dùng dòng Co-Authored-By. Mỗi phần quan trọng xong phải nhắc commit | Dễ merge về sau; không mất code |
 | 25/11 | Tham khảo đồ án BraTS của nhóm bạn, chỉ đọc, lưu ngoài repo | Xem [02_reference_hwolp_brats_analysis.md](02_reference_hwolp_brats_analysis.md) |
 | 25/11 | Giai đoạn 7 (tài khoản, quản lý, Docker): **phải làm mức sản phẩm, bắt buộc Docker khi bảo vệ**; chọn B hoặc C; đề xuất "C lõi" (≈ 16 ngày) | Xem [01_phase7_accounts_management_plan.md](01_phase7_accounts_management_plan.md) |
+| 25/11 | **Chốt giai đoạn 7:** C đầy đủ (JWT RS256 xoay vòng, Postgres, hàng đợi job, worker GPU, admin đầy đủ); **viết lại giao diện bằng React + Vite + TypeScript**; bảo vệ trên **laptop RTX 4060**; được sửa tiếp sau khi nộp. Tổng ≈ 25 ngày, chia: M0–M3 trước 15/12, M4 trong 16–30/12 | Nhóm muốn mức sản phẩm, chuẩn ngành; quỹ thời gian đến 30/12 đủ. Giữ viewer cũ song song tới khi bản React làm được đủ chức năng |
 | 25/11 | Khác biệt chính: **vai trò bệnh nhân** (dễ hiểu, tôn trọng tâm lý, có khu vực chờ để bệnh nhân bấm, khám phá); họ tên thật: quyết sau | Nhóm bạn không có vai trò này |
 
 ## 2. Việc đang dở
 
 - Tải gói trọng số DeepISLES: dừng ở 5,0/8,5 GB (tải tiếp được, có kiểm tra MD5), chưa giải nén. Sau đó thêm 3 mục vào `web/config.yaml` và chạy thử.
-- Giai đoạn 7: chờ chốt các câu hỏi ở mục 6 của tài liệu 01.
+- Giai đoạn 7: đã chốt; bắt đầu M0 (khung React, docker compose, kiểm tra GPU trong Docker).
 - Khu vực chờ của bệnh nhân: chờ bàn nội dung.
 - Cải tiến viewer học từ nhóm bạn (phím tắt, nhảy lát có tổn thương, phóng to một ô): chưa làm.
 
@@ -44,8 +45,10 @@ Affine đủ cho mức thùy, chạy dưới 1 giây và ổn định. Phi tuy�
 **Dice của NVAUTO, SEALS trên web cao hơn model nhóm, vậy model nhóm kém?**
 Không so như vậy được: ba model đó đã train trên cả 250 ca ISLES, gồm cả ca mẫu. Muốn so công bằng phải dùng số kiểm định chéo trong bài báo: NVAUTO 0,8086, Factorizer khoảng 0,76; model nhóm 0,7235. Phân tích nguyên nhân chênh lệch: `docs/paper22_reproduction.md`.
 
-**Vì sao dùng phiên đăng nhập trong DB mà không dùng JWT?** (nếu chốt "C lõi")
-Web và API cùng tên miền, nên cookie httpOnly cùng phiên lưu phía server là cách các framework khuyên dùng. Cách này thu hồi phiên được ngay (đăng xuất hay khóa tài khoản có hiệu lực tức thì). JWT hợp hơn khi có nhiều dịch vụ hoặc ứng dụng di động. Thiết kế vẫn mở để thêm JWT.
+**Đăng nhập hoạt động thế nào, sao không chỉ dùng JWT đơn giản?**
+- Access token là JWT ký RS256, sống ngắn (vài phút), chỉ giữ trong bộ nhớ trình duyệt, không để trong localStorage (tránh bị đánh cắp qua XSS).
+- Refresh token là chuỗi ngẫu nhiên trong cookie httpOnly, xoay vòng mỗi lần dùng. Nếu token cũ bị dùng lại (dấu hiệu bị đánh cắp), cả họ phiên bị thu hồi.
+- JWT đơn thuần không thu hồi được trước khi hết hạn. Lớp refresh lưu trong DB bù đúng điểm yếu đó: đăng xuất, khóa tài khoản hay đổi mật khẩu đều có hiệu lực ngay.
 
 **Dữ liệu bệnh nhân được bảo vệ thế nào?**
 - Ảnh tải lên được xóa sau khi xử lý (bản hiện tại).

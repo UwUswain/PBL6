@@ -1,8 +1,32 @@
 # Giai đoạn 7: Tài khoản, quản lý bệnh nhân và triển khai Docker
 
-> Trạng thái: **đang bàn, chưa code**. Viết ngày 25/11/2026.
+> Trạng thái: **đã chốt phạm vi (mục 0), chuẩn bị M0**. Viết ngày 25/11/2026.
 > Mốc thời gian: nộp bản chính thức khoảng **15/12/2026**, thi vấn đáp **31/12/2026**.
 > Tài liệu liên quan: [02_reference_hwolp_brats_analysis.md](02_reference_hwolp_brats_analysis.md) (phân tích đồ án nhóm bạn) và [03_web_decisions_log.md](03_web_decisions_log.md) (nhật ký quyết định).
+
+## 0. Đã chốt ngày 25/11/2026 (thay cho đề xuất ở mục 3–4)
+
+| Câu hỏi | Quyết định |
+|---|---|
+| Phạm vi | **C đầy đủ**: PostgreSQL và Alembic; JWT RS256 kèm refresh token xoay vòng và phát hiện dùng lại; hàng đợi job và worker GPU; trang admin theo dõi job/worker và benchmark model |
+| Giao diện | **Viết lại bằng React, Vite và TypeScript** |
+| Máy bảo vệ | **Laptop này (RTX 4060 8 GB)**: Docker Desktop, WSL2, GPU NVIDIA |
+| Sau khi nộp | **Được sửa tiếp** đến ngày thi 31/12 |
+
+### Ước lượng lại
+
+C đầy đủ 19,5 ngày, cộng viết lại React khoảng 4 ngày, cộng gắn các model DeepISLES 1,5 ngày, tổng **khoảng 25 ngày làm việc**. Quỹ thời gian từ 25/11 đến 30/12 là 35 ngày, nên **làm được**. Tuy vậy, không thể xong hết trước 15/12; phải chia làm hai đợt:
+
+| Mốc | Ngày | Nội dung | Xong khi |
+|---|---|---|---|
+| **M0** | 25–27/11 | Khung React + Vite + TS; docker compose (postgres, api, worker GPU, nginx phục vụ frontend đã build); Alembic; **kiểm tra GPU trong Docker** | `docker compose up` một lệnh; worker thấy RTX 4060 |
+| **M1** | 28/11–2/12 | Đăng nhập đầy đủ: Argon2id, JWT RS256 + refresh xoay vòng + phát hiện dùng lại, giới hạn đăng nhập sai, bắt đổi mật khẩu lần đầu, đăng xuất; phân quyền admin/bác sĩ/bệnh nhân; trang đăng nhập, đổi mật khẩu; admin quản lý tài khoản | Ba vai trò đăng nhập được; dùng lại token cũ thì phiên bị thu hồi; có test |
+| **M2** | 3–8/12 | Bệnh nhân, ca, tải ảnh có kiểm tra; hàng đợi job và worker (tiến độ, hủy, chạy lại); mask có phiên bản; duyệt có ghi người; nhật ký | Bác sĩ đi trọn: tạo bệnh nhân → ca → chạy model → sửa → duyệt |
+| **M3** | 9–13/12 | Chuyển viewer sang React (4 ô, sửa mask, vùng não, so sánh model) **kèm cải tiến**: phím tắt, nhảy tới lát có tổn thương, phóng to một ô; cổng bệnh nhân bản 1; test e2e | Viewer React chạy được mọi chức năng như bản cũ; bệnh nhân chỉ thấy ca đã duyệt của mình |
+| Dự phòng | 14–15/12 | Sửa lỗi, đóng băng, **nộp** | |
+| **M4** | 16–30/12 | Trang admin theo dõi job/worker và benchmark model; khu vực chờ bản 2; đưa NVAUTO/SEALS/Factorizer vào worker; CI; rà soát bảo mật; tập dượt trên laptop; ôn vấn đáp | |
+
+**Rủi ro lớn nhất là chuyển viewer sang React** (hơn 1.400 dòng đang chạy). Phương án an toàn: **giữ viewer HTML cũ chạy song song** cho tới khi bản React làm được đủ mọi chức năng như bản cũ. Nếu đến 13/12 vẫn chưa đủ, bản nộp nhúng viewer cũ vào trang ca và tiếp tục chuyển trong đợt M4.
 
 ## 1. Vì sao làm
 
@@ -67,7 +91,7 @@ Từ 25/11 đến 15/12 là 20 ngày lịch. Trong khoảng đó còn các việ
 
 Kết luận: **C đầy đủ (19,5 ngày) không vừa** trước 15/12 nếu tính cả các việc trên. **B (11 ngày) vừa** nhưng không "xịn" bằng ở các điểm thầy dễ thấy: Postgres, hàng đợi job, Docker nhiều dịch vụ.
 
-## 3. Đề xuất: "C lõi"
+## 3. Đề xuất ban đầu: "C lõi" (không được chọn; giữ lại để thấy lý do)
 
 Làm **C ở mọi chỗ nhìn thấy và hỏi được khi bảo vệ**, còn những chỗ tốn công mà ít giá trị thì để sau:
 
@@ -87,7 +111,7 @@ Làm **C ở mọi chỗ nhìn thấy và hỏi được khi bảo vệ**, còn 
 - JWT xoay vòng tốn thêm khoảng 1 ngày. Khi bảo vệ, **giải thích được vì sao chọn** có giá trị hơn là chép cơ chế phức tạp.
 - Thiết kế vẫn để chỗ thêm JWT sau ngày nộp, nếu nhóm muốn.
 
-## 4. Lộ trình
+## 4. Lộ trình cho "C lõi" (đã thay bằng mục 0)
 
 | Mốc | Ngày | Nội dung | Kiểm tra xong khi |
 |---|---|---|---|
