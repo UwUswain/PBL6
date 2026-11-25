@@ -6,7 +6,7 @@ import { useI18n, type Key } from '../lib/i18n'
 
 const NAV: Record<Role, { to: string; label: Key }[]> = {
   admin: [{ to: '/admin/users', label: 'navUsers' }, { to: '/admin/audit', label: 'navAudit' }],
-  doctor: [{ to: '/doctor', label: 'navCases' }],
+  doctor: [{ to: '/doctor', label: 'navPatients' }, { to: '/doctor/review', label: 'navReview' }],
   patient: [{ to: '/patient', label: 'navMyResults' }],
 }
 const ROLE_LABEL: Record<Role, Key> = { admin: 'roleAdmin', doctor: 'roleDoctor', patient: 'rolePatient' }

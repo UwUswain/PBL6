@@ -202,6 +202,17 @@ def create_patient(body: PatientIn, request: Request, p: Principal = Depends(doc
     return pt
 
 
+def _patient_out(db: Session, pt: Patient) -> PatientOut:
+    n = db.scalar(select(func.count()).select_from(Case).where(Case.patient_id == pt.id, Case.deleted_at.is_(None)))
+    return PatientOut(**PatientOut.model_validate(pt).model_dump(exclude={"has_account", "case_count"}),
+                      has_account=pt.user_id is not None, case_count=n)
+
+
+@router.get("/patients/{patient_id}", response_model=PatientOut)
+def get_patient(patient_id: uuid.UUID, p: Principal = Depends(doctor), db: Session = Depends(get_db)):
+    return _patient_out(db, _patient(db, p, patient_id))
+
+
 @router.patch("/patients/{patient_id}", response_model=PatientOut)
 def update_patient(patient_id: uuid.UUID, body: PatientUpdate, request: Request, p: Principal = Depends(doctor),
                    db: Session = Depends(get_db)):

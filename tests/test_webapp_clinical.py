@@ -110,6 +110,8 @@ class ClinicalFlowTest(unittest.TestCase):
         # Another doctor sees nothing and gets 404 (not 403), so existence is not revealed.
         self.assertNotIn("PT-ISO", [p["code"] for p in self.c.get("/api/v1/patients", headers=self.doc_b).json()])
         self.assertEqual(self.c.get(f"/api/v1/cases/{case['id']}", headers=self.doc_b).status_code, 404)
+        self.assertEqual(self.c.get(f"/api/v1/patients/{pt['id']}", headers=self.doc_b).status_code, 404)
+        self.assertEqual(self.c.get(f"/api/v1/patients/{pt['id']}", headers=self.doc_a).json()["case_count"], 1)
         self.assertEqual(self.upload(case["id"], "dwi", DWI, headers=self.doc_b).status_code, 404)
         self.assertEqual(self.c.get("/api/v1/patients", headers=self.admin).status_code, 403)  # admin: no clinical data
         mine = self.c.get("/api/v1/patients?q=ISO", headers=self.doc_a).json()

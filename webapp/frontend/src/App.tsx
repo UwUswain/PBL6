@@ -8,6 +8,10 @@ import AdminUsersPage from './pages/AdminUsersPage'
 import ChangePasswordPage from './pages/ChangePasswordPage'
 import LoginPage from './pages/LoginPage'
 import { Message, Placeholder } from './pages/SimplePages'
+import CasePage from './pages/doctor/CasePage'
+import PatientPage from './pages/doctor/PatientPage'
+import PatientsPage from './pages/doctor/PatientsPage'
+import ReviewPage from './pages/doctor/ReviewPage'
 import { Guard, HomeRedirect, SignedIn } from './routes'
 
 export default function App() {
@@ -22,7 +26,10 @@ export default function App() {
             <Route element={<Guard><AppShell /></Guard>}>
               <Route path="/admin/users" element={<Guard roles={['admin']}><AdminUsersPage /></Guard>} />
               <Route path="/admin/audit" element={<Guard roles={['admin']}><AdminAuditPage /></Guard>} />
-              <Route path="/doctor" element={<Guard roles={['doctor']}><Placeholder title="doctorHome" milestone="M2" /></Guard>} />
+              <Route path="/doctor" element={<Guard roles={['doctor']}><PatientsPage /></Guard>} />
+              <Route path="/doctor/patients/:id" element={<Guard roles={['doctor']}><PatientPage /></Guard>} />
+              <Route path="/doctor/cases/:id" element={<Guard roles={['doctor']}><CasePage /></Guard>} />
+              <Route path="/doctor/review" element={<Guard roles={['doctor']}><ReviewPage /></Guard>} />
               <Route path="/patient" element={<Guard roles={['patient']}><Placeholder title="patientHome" milestone="M3" /></Guard>} />
             </Route>
             <Route path="/403" element={<Message text="forbidden" />} />

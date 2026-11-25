@@ -91,3 +91,95 @@ export async function logout(): Promise<void> {
   await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined)
   accessToken = null
 }
+
+// ---------- M2 clinical types ----------
+
+export type CaseStatus = 'draft' | 'ready' | 'queued' | 'running' | 'awaiting_review' | 'approved' | 'failed'
+
+export interface Patient {
+  id: string
+  code: string
+  birth_year: number | null
+  sex: 'M' | 'F' | 'O' | null
+  created_at: string
+  has_account: boolean
+  case_count: number
+}
+
+export interface CaseSummary {
+  id: string
+  patient_id: string
+  patient_code: string
+  study_date: string | null
+  notes: string | null
+  status: CaseStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface Region { region: string | null; side: 'left' | 'right' | null; ml: number; share: number }
+
+export interface MaskStats {
+  volume_ml: number
+  lesion_count: number
+  hemisphere: 'left' | 'right' | 'both' | 'none'
+  left_ml: number
+  right_ml: number
+  regions?: Region[]
+  atlas_fit?: number
+}
+
+export interface MaskVersion {
+  id: string
+  version_no: number
+  source: 'ai' | 'doctor'
+  model_name: string | null
+  stats: MaskStats
+  note: string | null
+  created_at: string
+}
+
+export interface Job {
+  id: string
+  model_name: string
+  state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  stage: string | null
+  error: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface CaseDetail extends CaseSummary {
+  volumes: { modality: 'dwi' | 'adc' | 'flair'; shape: number[]; spacing_mm: number[]; size_bytes: number; uploaded_at: string }[]
+  jobs: Job[]
+  masks: MaskVersion[]
+  approval: { id: string; mask_version_id: string; approved_at: string; patient_note: string | null; show_functions: boolean } | null
+  inputs_locked: boolean
+}
+
+export interface ModelInfo {
+  name: string
+  label: string
+  modalities: string[]
+  required: string[]
+  available: boolean
+  is_default: boolean
+  info: { metrics?: { source?: string; values?: Record<string, number> } | null; note?: Record<string, string> | null } | null
+}
+
+/** Authenticated file download (the token is a header, so a plain <a href> cannot be used). */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const headers = new Headers()
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+  let res = await fetch(`/api/v1${path}`, { headers })
+  if (res.status === 401 && (await refreshSession())) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+    res = await fetch(`/api/v1${path}`, { headers })
+  }
+  if (!res.ok) throw new ApiError(res.status, res.statusText)
+  const url = URL.createObjectURL(await res.blob())
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename })
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
