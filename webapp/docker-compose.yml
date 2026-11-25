@@ -24,10 +24,12 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://pbl6:${POSTGRES_PASSWORD}@db:5432/pbl6
       JWT_KEY_DIR: /srv/keys
+      DATA_DIR: /srv/data
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in webapp/.env}
     volumes:
       - jwtkeys:/srv/keys  # RSA signing key survives restarts, so sessions do too
+      - casedata:/srv/data  # uploads (api) and masks (worker)
     depends_on:
       db:
         condition: service_healthy
@@ -50,7 +52,18 @@ services:
     restart: unless-stopped
 
   worker:
-    build: ./worker
+    build:
+      context: ..  # repo root: the image copies src/ and web/ (filtered by worker/Dockerfile.dockerignore)
+      dockerfile: webapp/worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://pbl6:${POSTGRES_PASSWORD}@db:5432/pbl6
+      DATA_DIR: /srv/data
+    volumes:
+      - casedata:/srv/data
+      - ../experiments/runs:/srv/app/experiments/runs:ro  # checkpoints named in web/config.yaml
+    depends_on:
+      api:
+        condition: service_healthy  # the api applies migrations first
     deploy:
       resources:
         reservations:
@@ -59,8 +72,9 @@ services:
               count: 1
               capabilities: [gpu]
     mem_limit: 4g
-    restart: "no"  # shortcut: M0 worker only runs the GPU check and exits; M2 makes it a long-running service
+    restart: unless-stopped
 
 volumes:
   pgdata:
   jwtkeys:
+  casedata:

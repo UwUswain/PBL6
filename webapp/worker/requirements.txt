@@ -1,0 +1,10 @@
+# Worker image on top of pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime. Versions follow the root requirements.txt.
+nibabel==5.4.2
+numpy==2.2.6
+scipy==1.15.3
+PyYAML==6.0.3
+pandas==2.3.3
+opencv-python-headless==5.0.0.93
+SimpleITK==2.5.8
+sqlalchemy==2.0.49
+psycopg[binary]==3.3.3

@@ -6,7 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 
 COPY webapp/worker/requirements.txt webapp/worker/constraints.txt /tmp/
-RUN pip install -r /tmp/requirements.txt -c /tmp/constraints.txt
+# MONAI 1.6 metadata asks torch>=2.8, but the team trains and infers with MONAI 1.6 on torch 2.5.1: no deps.
+RUN pip install -r /tmp/requirements.txt -c /tmp/constraints.txt \
+ && pip install --no-deps monai==1.6.0
 
 RUN useradd --create-home --uid 1000 worker && mkdir -p /srv/data && chown worker /srv/data
 COPY src/ /srv/app/src/

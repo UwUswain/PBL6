@@ -1,0 +1,10 @@
+# Build context is the repo root; send only what the worker image copies.
+*
+!src/
+!web/inference.py
+!web/regions.py
+!web/config.yaml
+!web/atlas/
+!webapp/backend/app/
+!webapp/worker/
+**/__pycache__
