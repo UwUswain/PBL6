@@ -6,12 +6,14 @@ mixed-precision (AMP FP16) training, sliding-window validation, and checkpointin
 """
 
 import argparse
+import json
 from datetime import datetime
 import logging
+import math
 from pathlib import Path
 import sys
 import time
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,13 +24,92 @@ import torch
 import torch.nn as nn
 import yaml
 from monai.inferers import sliding_window_inference
+from monai.utils import set_determinism
 
 from src.dataset.dataloader import build_kfold_dataloaders
 from src.losses.builder import get_loss_function
 from src.metrics.dice import compute_dice
 from src.models.builder import get_model
+from src.utils.manifest import build_run_manifest, write_run_manifest
+from src.utils.postprocess import remove_small_lesion_islands
 
 logger = logging.getLogger("train_engine")
+
+
+def _compute_model_checksum(model: nn.Module) -> Tuple[float, float]:
+    """Computes deterministic parameter sum and L2 norm for initialization/reload verification."""
+    with torch.no_grad():
+        total_sum = sum(float(p.detach().double().sum().cpu()) for p in model.parameters())
+        total_sq = sum(float((p.detach().double() ** 2).sum().cpu()) for p in model.parameters())
+    return total_sum, float(total_sq ** 0.5)
+
+
+def verify_resume_checkpoint(
+    ckpt: Dict[str, Any],
+    model_name: str,
+    in_channels: int,
+    roi_size: Tuple[int, ...],
+    val_roi_size: Tuple[int, ...],
+    fold: int,
+    split_manifest: Dict[str, Any],
+    checkpoint_name: str = "checkpoint.pth",
+) -> None:
+    """Verifies that a checkpoint is valid for resuming training.
+
+    Validates:
+    - Presence of required state keys ('epoch', 'model_state_dict', etc.)
+    - Presence and valid schema of 'run_manifest' (specifically ['config']['resolved'] and ['split'])
+    - Matching model architecture, input channels, train ROI, val ROI, and fold
+    - Validation split hash consistency (to prevent training on mismatched splits)
+    """
+    required_keys = ["epoch", "model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "scaler_state_dict"]
+    missing_keys = [k for k in required_keys if k not in ckpt]
+    if missing_keys:
+        raise KeyError(f"Resume checkpoint {checkpoint_name} is missing required state keys: {missing_keys}")
+
+    if "run_manifest" not in ckpt:
+        raise KeyError(f"Resume checkpoint {checkpoint_name} missing required 'run_manifest'")
+
+    ckpt_manifest = ckpt["run_manifest"]
+    if not isinstance(ckpt_manifest, dict):
+        raise TypeError(f"Resume checkpoint {checkpoint_name} manifest must be a dict, got {type(ckpt_manifest)}")
+    if "config" not in ckpt_manifest or not isinstance(ckpt_manifest["config"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: 'config'")
+    if "resolved" not in ckpt_manifest["config"] or not isinstance(ckpt_manifest["config"]["resolved"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: ['config']['resolved']")
+    if "split" not in ckpt_manifest or not isinstance(ckpt_manifest["split"], dict):
+        raise KeyError(f"Resume checkpoint {checkpoint_name} manifest missing dict key: 'split'")
+
+    m_res = ckpt_manifest["config"]["resolved"]
+    m_split = ckpt_manifest["split"]
+
+    # 1. Architecture check
+    m_model = m_res.get("model_name")
+    if m_model != model_name:
+        raise ValueError(f"Resume model architecture mismatch: checkpoint has '{m_model}', config specifies '{model_name}'")
+
+    # 2. Input channel check
+    m_ch = m_res.get("in_channels")
+    if m_ch != in_channels:
+        raise ValueError(f"Resume input channel mismatch: checkpoint has {m_ch}, config specifies {in_channels}")
+
+    # 3. ROI check
+    m_roi = m_res.get("roi_size")
+    if m_roi != list(roi_size):
+        raise ValueError(f"Resume train ROI mismatch: checkpoint has {m_roi}, config specifies {list(roi_size)}")
+    m_val_roi = m_res.get("val_roi_size")
+    if m_val_roi != list(val_roi_size):
+        raise ValueError(f"Resume val ROI mismatch: checkpoint has {m_val_roi}, config specifies {list(val_roi_size)}")
+
+    # 4. Split fold and val hash check
+    m_fold = m_split.get("fold")
+    if m_fold != fold:
+        raise ValueError(f"Resume fold mismatch: checkpoint was trained on fold {m_fold}, requested fold {fold}")
+    if "val_sha256" in m_split and split_manifest.get("val_sha256"):
+        if m_split["val_sha256"] != split_manifest["val_sha256"]:
+            raise ValueError(f"Resume validation split hash mismatch: checkpoint has {m_split['val_sha256']}, dataloader has {split_manifest['val_sha256']}")
+
+    logger.info("Resume checkpoint manifest verified successfully: fold=%d, roi=%s, val_roi=%s", m_fold, m_roi, m_val_roi)
 
 
 def setup_logger(log_file: Path) -> None:
@@ -50,10 +131,13 @@ def setup_logger(log_file: Path) -> None:
     stream_handler.setFormatter(formatter)
     stream_handler.setLevel(logging.INFO)
 
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
+    for target_name in ("train_engine", "src"):
+        target_logger = logging.getLogger(target_name)
+        target_logger.setLevel(logging.INFO)
+        target_logger.handlers.clear()
+        target_logger.addHandler(file_handler)
+        target_logger.addHandler(stream_handler)
+        target_logger.propagate = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,13 +195,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run a minimal smoke test (2 train batches, 1 val case) to verify pipeline.",
+        help="Run a full pipeline smoke test (train steps, scheduler, val, save & reload verification).",
+    )
+    parser.add_argument(
+        "--dry-run-steps",
+        type=int,
+        default=2,
+        help="Number of real training batches to execute in --dry-run mode (default: 2).",
+    )
+    parser.add_argument(
+        "--dry-run-val-cases",
+        type=int,
+        default=2,
+        help="Number of validation volumes to evaluate in --dry-run mode (default: 2).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Override number of worker processes for DataLoader (default: use config value).",
     )
     parser.add_argument(
         "--sw-overlap",
         type=float,
         default=0.25,
         help="Sliding window overlap ratio for validation inference [0.0 - 0.99].",
+    )
+    parser.add_argument(
+        "--postprocess-min-size",
+        type=int,
+        default=0,
+        help="Minimum 3D connected-component voxel size for validation filtering (default: 0 = disabled).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to use ('cuda', 'cpu'). Defaults to cuda if available.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for weight init, DataLoader shuffle, and transforms (overrides config).",
+    )
+    parser.add_argument(
+        "--strict-isles250",
+        action="store_true",
+        help="Enforce strict verification of all 250 ISLES-2022 case IDs and files before training.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to checkpoint (.pth) to resume training from.",
+    )
+    parser.add_argument(
+        "--end-epoch",
+        type=int,
+        default=None,
+        help="Target epoch to stop training (overrides total_epochs when resuming).",
     )
     return parser.parse_args()
 
@@ -131,11 +268,28 @@ def train_epoch(
     device: torch.device,
     use_amp: bool,
     max_steps: int = 0,
-) -> float:
-    """Runs one training epoch over the patch dataloader."""
+) -> Tuple[float, Dict[str, Any]]:
+    """Runs one training epoch over the patch dataloader with deep supervision and telemetry."""
     model.train()
     epoch_loss = 0.0
     step_count = 0
+    total_patches = 0
+    total_grad_norm = 0.0
+    skipped_step_count = 0
+    empty_patch_main_count = 0
+    empty_patch_aux1_count = 0
+    empty_patch_aux2_count = 0
+    total_fg_main = 0
+    total_fg_aux1 = 0
+    total_fg_aux2 = 0
+    total_main_dice = 0.0
+    total_main_focal = 0.0
+    total_main_loss = 0.0
+    total_aux1_loss = 0.0
+    total_aux2_loss = 0.0
+    has_aux = False
+    has_dice_focal = False
+    last_scale = 1.0
 
     total_steps = len(loader) if hasattr(loader, "__len__") else 0
     for step, batch_data in enumerate(loader):
@@ -146,28 +300,124 @@ def train_epoch(
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             outputs = model(inputs)
-            loss = loss_fn(outputs, labels)
+            if isinstance(outputs, (tuple, list)):
+                main_out, aux1, aux2 = outputs
+                main_loss = loss_fn(main_out, labels)
+                target_aux1 = torch.nn.functional.interpolate(
+                    labels, size=aux1.shape[2:], mode='nearest'
+                )
+                target_aux2 = torch.nn.functional.interpolate(
+                    labels, size=aux2.shape[2:], mode='nearest'
+                )
+                aux1_loss = loss_fn(aux1, target_aux1)
+                aux2_loss = loss_fn(aux2, target_aux2)
+                # Multi-scale deep supervision formulation (Paper 32 Eq. 15)
+                loss = main_loss + 0.5 * aux1_loss + 0.25 * aux2_loss
+            else:
+                loss = loss_fn(outputs, labels)
+                main_out = outputs
+                main_loss = loss
+                aux1_loss = None
+                aux2_loss = None
+                target_aux1 = None
+                target_aux2 = None
 
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if use_amp:
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            old_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            new_scale = scaler.get_scale()
+            last_scale = new_scale
+            if new_scale < old_scale:
+                skipped_step_count += 1
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            old_scale = 1.0
+            new_scale = 1.0
+            last_scale = 1.0
 
-        epoch_loss += loss.item()
+        step_loss = loss.item()
+        epoch_loss += step_loss
         step_count += 1
+        gn_val = grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm)
+        total_grad_norm += gn_val
+
+        # Telemetry per patch (element in batch) without modifying backward or loss
+        with torch.no_grad():
+            b_size = labels.shape[0]
+            total_patches += b_size
+
+            # Per-patch foreground count for main target
+            for b in range(b_size):
+                p_fg = int((labels[b] > 0.5).sum().item())
+                total_fg_main += p_fg
+                if p_fg == 0:
+                    empty_patch_main_count += 1
+
+            total_main_loss += main_loss.item()
+            if isinstance(outputs, (tuple, list)):
+                has_aux = True
+                for b in range(b_size):
+                    p_fg_aux1 = int((target_aux1[b] > 0.5).sum().item())
+                    total_fg_aux1 += p_fg_aux1
+                    if p_fg_aux1 == 0:
+                        empty_patch_aux1_count += 1
+
+                    p_fg_aux2 = int((target_aux2[b] > 0.5).sum().item())
+                    total_fg_aux2 += p_fg_aux2
+                    if p_fg_aux2 == 0:
+                        empty_patch_aux2_count += 1
+
+                total_aux1_loss += aux1_loss.item()
+                total_aux2_loss += aux2_loss.item()
+
+            if hasattr(loss_fn, "dice") and hasattr(loss_fn, "focal"):
+                has_dice_focal = True
+                m_dice = loss_fn.dice(main_out, labels).item()
+                m_focal = loss_fn.focal(main_out, labels).item()
+                total_main_dice += m_dice
+                total_main_focal += m_focal
 
         if (step + 1) % 25 == 0 or (step + 1) == total_steps:
             logger.info(
-                "    [Train Batch %d/%s] Step Loss: %.4f | Running Avg Loss: %.4f",
+                "    [Train Batch %d/%s] Step Loss: %.4f | Running Avg Loss: %.4f | Grad Norm: %.4f | Empty Patches: %d/%d",
                 step + 1,
                 str(total_steps) if total_steps > 0 else "?",
-                loss.item(),
+                step_loss,
                 epoch_loss / step_count,
+                gn_val,
+                empty_patch_main_count,
+                total_patches,
             )
 
         if max_steps > 0 and step_count >= max_steps:
             break
 
-    return epoch_loss / max(step_count, 1)
+    n_steps = max(step_count, 1)
+    n_patches = max(total_patches, 1)
+
+    telemetry = {
+        "train_loss": epoch_loss / n_steps,
+        "main_loss": total_main_loss / n_steps,
+        "aux1_loss": (total_aux1_loss / n_steps) if has_aux else None,
+        "aux2_loss": (total_aux2_loss / n_steps) if has_aux else None,
+        "main_dice": (total_main_dice / n_steps) if has_dice_focal else None,
+        "main_focal": (total_main_focal / n_steps) if has_dice_focal else None,
+        "grad_norm": total_grad_norm / n_steps,
+        "amp_scale": last_scale,
+        "skipped_steps": skipped_step_count,
+        "empty_patch_ratio": float(empty_patch_main_count / n_patches),
+        "empty_patch_aux1_ratio": float(empty_patch_aux1_count / n_patches) if has_aux else None,
+        "empty_patch_aux2_ratio": float(empty_patch_aux2_count / n_patches) if has_aux else None,
+        "mean_fg_voxels": float(total_fg_main / n_patches),
+        "mean_fg_aux1": float(total_fg_aux1 / n_patches) if has_aux else None,
+        "mean_fg_aux2": float(total_fg_aux2 / n_patches) if has_aux else None,
+    }
+    return epoch_loss / n_steps, telemetry
 
 
 def validate(
@@ -178,11 +428,13 @@ def validate(
     use_amp: bool,
     overlap: float = 0.25,
     max_cases: int = 0,
-) -> Tuple[float, int]:
-    """Runs full-volume evaluation using sliding window inference."""
+    postprocess_min_size: int = 0,
+) -> Tuple[float, int, int]:
+    """Runs full-volume evaluation using sliding window inference and tracks positive predictions."""
     model.eval()
     total_dice = 0.0
     case_count = 0
+    total_pos_voxels = 0
     total_loader_cases = len(loader.dataset) if hasattr(loader, "dataset") else -1
 
     with torch.no_grad():
@@ -212,6 +464,12 @@ def validate(
 
             # Binarize output mask
             val_preds = (torch.sigmoid(val_outputs) > 0.5).float()
+            if postprocess_min_size > 0:
+                val_preds = remove_small_lesion_islands(
+                    val_preds, min_size_voxels=postprocess_min_size
+                )
+            pos_voxels = int((val_preds > 0.5).sum().item())
+            total_pos_voxels += pos_voxels
             dice = compute_dice(val_preds[0, 0], val_labels[0, 0])
             elapsed = time.time() - case_start
 
@@ -219,18 +477,19 @@ def validate(
             case_count += 1
 
             logger.info(
-                "  [Val Case %d/%s] Finished in %.2fs | Dice Score: %.4f",
+                "  [Val Case %d/%s] Finished in %.2fs | Dice Score: %.4f | Pos Voxels: %d",
                 case_idx + 1,
                 str(total_loader_cases) if total_loader_cases > 0 else "?",
                 elapsed,
                 dice,
+                pos_voxels,
             )
 
             if max_cases > 0 and case_count >= max_cases:
                 break
 
     mean_dice = total_dice / max(case_count, 1)
-    return mean_dice, case_count
+    return mean_dice, case_count, total_pos_voxels
 
 
 def main() -> None:
@@ -249,37 +508,66 @@ def main() -> None:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    exp_cfg = cfg.get("experiment", {})
+    data_cfg = cfg.get("data", {})
+
     # 1. Trích xuất các tham số thực nghiệm (experiment) từ cfg:
     # - model_name: Kiến trúc mạng ('segresnet', 'mednext', 'swin_unetr')
     # - max_epochs: Số epoch huấn luyện tối đa
     # - learning_rate: Tốc độ học khởi tạo cho Optimizer AdamW
-    model_name = str(cfg["experiment"]["model_name"])
-    max_epochs = int(cfg["experiment"]["max_epochs"])
-    learning_rate = float(cfg["experiment"]["learning_rate"])
+    model_name = str(exp_cfg["model_name"])
+    max_epochs = int(exp_cfg["max_epochs"])
+    learning_rate = float(exp_cfg["learning_rate"])
+
+    raw_seed = args.seed if args.seed is not None else exp_cfg.get("seed", None)
+    seed_val = int(raw_seed) if raw_seed is not None else None
+    if seed_val is not None:
+        set_determinism(seed=seed_val)
+
+    strict_isles250 = bool(
+        args.strict_isles250
+        or exp_cfg.get("strict_isles250", False)
+        or data_cfg.get("strict_isles250", False)
+    )
+    expected_num_cases = exp_cfg.get(
+        "expected_num_cases",
+        data_cfg.get("expected_num_cases", 250 if strict_isles250 else None),
+    )
 
     # 2. Trích xuất và ép kiểu các tham số dữ liệu (data) từ cfg:
-    # - roi_size: Bắt buộc ép kiểu thành tuple (H, W, D) để truyền vào MONAI transforms
-    # - batch_size: Số lượng patch được đưa vào mỗi bước huấn luyện
+    # - roi_size: Bắt buộc ép kiểu thành tuple (H, W, D) để truyền vào MONAI transforms lúc train
+    # - val_roi_size: Sliding window ROI lúc validation (nếu không khai báo, mặc định bằng roi_size)
+    # - batch_size: Số lượng volume được đưa vào mỗi bước huấn luyện
     # - num_workers: Số tiến trình CPU đọc và tiền xử lý dữ liệu ngầm
-    roi_size = tuple(cfg["data"]["roi_size"])
-    batch_size = int(cfg["data"]["batch_size"])
-    num_workers = int(cfg["data"]["num_workers"])
+    roi_size = tuple(data_cfg["roi_size"])
+    val_roi_size = tuple(data_cfg.get("val_roi_size", roi_size))
+    batch_size = int(data_cfg["batch_size"])
+    num_workers = (
+        args.num_workers
+        if args.num_workers is not None
+        else int(data_cfg["num_workers"])
+    )
 
-    # 3. Logic CacheDataset và Modalities (Hỗ trợ 2 kênh DWI+ADC hoặc 3 kênh DWI+ADC+FLAIR/eDWI)
-    use_cache = bool(cfg["data"].get("use_cache", False))
-    cache_rate = float(cfg["data"].get("cache_rate", 1.0 if use_cache else 0.5))
-    use_edwi = bool(cfg["data"].get("use_edwi", False))
+    # 3. Logic CacheDataset: Dựa vào cờ cfg['data']['use_cache'], quyết định xem sẽ
+    # bọc dữ liệu bằng monai.data.CacheDataset (nếu True) hay monai.data.Dataset thông thường (nếu False).
+    # - Khi use_cache = True: Bộ nạp sẽ giữ toàn bộ hoặc một phần (cache_rate) dữ liệu đã tiền xử lý
+    #   trực tiếp trên bộ nhớ RAM. Giúp bỏ qua bước I/O từ ổ cứng ở mỗi epoch, tăng tốc độ 5-8 lần.
+    # - Khi use_cache = False: Bộ nạp sẽ xử lý on-the-fly trên từng batch, giúp tiết kiệm RAM tối đa.
+    use_cache = bool(data_cfg.get("use_cache", False)) and (not args.dry_run)
+    cache_rate = float(data_cfg.get("cache_rate", 1.0 if use_cache else 0.5))
+    use_edwi = bool(data_cfg.get("use_edwi", False))
+    pos_ratio = float(data_cfg.get("pos_ratio", 1.0))
+    neg_ratio = float(data_cfg.get("neg_ratio", 1.0))
+    num_samples_per_volume = int(data_cfg.get("num_samples_per_volume", 2))
 
-    modalities = cfg["data"].get("modalities", None)
-    cfg_channels = cfg["experiment"].get("in_channels", cfg["data"].get("in_channels", None))
+    # Parse input modalities and channel configuration
+    modalities = data_cfg.get("modalities", None)
+    cfg_channels = exp_cfg.get("in_channels", data_cfg.get("in_channels", None))
     if modalities is not None:
         in_channels = int(cfg_channels) if cfg_channels is not None else len(modalities)
     elif cfg_channels is not None:
         in_channels = int(cfg_channels)
-        if in_channels == 2:
-            modalities = ["dwi", "adc"]
-        else:
-            modalities = ["dwi", "adc", "flair"]
+        modalities = ["dwi", "adc"] if in_channels == 2 else ["dwi", "adc", "flair"]
     else:
         in_channels = 3
         modalities = ["dwi", "adc", "flair"]
@@ -287,7 +575,10 @@ def main() -> None:
     # =========================================================================
     # BƯỚC 2: THIẾT LẬP THIẾT BỊ VÀ THƯ MỤC THỰC NGHIỆM
     # =========================================================================
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and (device.type == "cuda")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -298,12 +589,9 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(run_dir / "train.log")
 
+    modalities_str = " + ".join([m.upper() for m in modalities])
     if use_edwi:
-        modality_desc = "[DWI + ADC + eDWI (CLAHE)]"
-    elif modalities == ["dwi", "adc"]:
-        modality_desc = "[DWI + ADC] (2 channels - SOTA Diffusion restricted)"
-    else:
-        modality_desc = f"[{' + '.join([str(m).upper() for m in modalities])}] ({in_channels} channels)"
+        modalities_str += " + eDWI (CLAHE)"
 
     logger.info("=" * 75)
     logger.info("ISLES-2022 TRAINING ENGINE (MLOps Config Mode)")
@@ -312,10 +600,17 @@ def main() -> None:
     logger.info("Experiment run dir: %s", run_dir)
     logger.info("Device: %s | AMP FP16 Enabled: %s", device, use_amp)
     logger.info("Model: %s | Fold: %d/%d", model_name, args.fold, args.n_splits)
-    logger.info("Input modalities: %s", modality_desc)
-    logger.info("Patch dimensions (roi_size): %s | Batch size: %d", roi_size, batch_size)
+    logger.info("Input modalities: [%s] (%d channels)", modalities_str, in_channels)
+    logger.info("Patch dimensions (roi_size): %s | Val ROI size: %s | Batch size: %d", roi_size, val_roi_size, batch_size)
     logger.info("Num workers: %d | Use CacheDataset: %s (cache_rate: %.2f)", num_workers, use_cache, cache_rate)
-    logger.info("Max epochs: %d | Learning rate: %.1e | Dry-run: %s", max_epochs, learning_rate, args.dry_run)
+    logger.info(
+        "Max epochs: %d | Learning rate: %.1e | Seed: %s | Strict ISLES-250: %s | Dry-run: %s",
+        max_epochs,
+        learning_rate,
+        str(seed_val),
+        strict_isles250,
+        args.dry_run,
+    )
 
     # =========================================================================
     # BƯỚC 3: XÂY DỰNG DATALOADERS (BỌC CACHEDATASET HOẶC DATASET)
@@ -330,6 +625,15 @@ def main() -> None:
             "-> RAM Cache disabled: Wrapping data with standard monai.data.Dataset for memory efficiency."
         )
 
+    sampling_mode = data_cfg.get("sampling_mode", exp_cfg.get("sampling_mode", "standard"))
+    if sampling_mode == "component_aware":
+        logger.info("-> Active Sampling: Component-Aware Cropping (balanced micro-lesion oversampling enabled).")
+    else:
+        logger.info("-> Active Sampling: Standard Voxel-Uniform Pos/Neg Cropping.")
+
+    split_seed = int(exp_cfg.get("split_seed", 42))
+    train_seed = int(seed_val if seed_val is not None else 42)
+    split_manifest: Dict[str, Any] = {}
     train_loader, val_loader = build_kfold_dataloaders(
         data_dir=args.data_dir,
         fold=args.fold,
@@ -339,41 +643,251 @@ def main() -> None:
         num_workers=num_workers,
         use_cache=use_cache,
         cache_rate=cache_rate,
+        seed=split_seed,
         use_edwi=use_edwi,
         modalities=modalities,
         in_channels=in_channels,
+        sampling_mode=sampling_mode,
+        pos_ratio=pos_ratio,
+        neg_ratio=neg_ratio,
+        num_samples_per_volume=num_samples_per_volume,
+        strict_isles250=strict_isles250,
+        expected_num_cases=expected_num_cases,
+        train_seed=train_seed,
+        split_info_out=split_manifest,
     )
 
     # =========================================================================
     # BƯỚC 4: KHỞI TẠO MÔ HÌNH (MODEL ARCHITECTURE)
     # =========================================================================
-    logger.info("Instantiating %s model (%d channels in, 1 channel out)...", model_name, in_channels)
+    init_filters = int(exp_cfg.get("init_filters", 32 if "dual_segresnet" in model_name else 16))
+    fusion_mode = str(exp_cfg.get("fusion_mode", "bidirectional"))
+    deep_supervision = bool(exp_cfg.get("deep_supervision", True))
+
+    if seed_val is not None:
+        set_determinism(seed=seed_val)
+
+    model_kwargs = {}
+    normalized_model_name = model_name.lower().strip()
+    if normalized_model_name in (
+        "dual_segresnet",
+        "dual_encoder_segresnet",
+    ):
+        model_kwargs.update(
+            init_filters=init_filters,
+            fusion_mode=fusion_mode,
+            deep_supervision=deep_supervision,
+        )
+    elif normalized_model_name == "segresnet":
+        model_kwargs["init_filters"] = init_filters
+
+    logger.info(
+        "Instantiating %s (channels: %d, options: %s)...",
+        model_name,
+        in_channels,
+        model_kwargs,
+    )
     model = get_model(
         model_name=model_name,
         in_channels=in_channels,
         out_channels=1,
+        **model_kwargs,
     ).to(device)
 
-    # =========================================================================
-    # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS), OPTIMIZER VÀ SCHEDULER
-    # =========================================================================
-    loss_fn = get_loss_function(include_background=False, sigmoid=True, squared_pred=True)
+    init_sum, init_l2 = _compute_model_checksum(model)
+    logger.info("Initial model param checksum | sum=%.6f | l2_norm=%.6f", init_sum, init_l2)
 
+    # =========================================================================
+    # BƯỚC 5: HÀM MẤT MÁT (SOTA DICEJACCARDLOSS / DICEFOCALLOSS), OPTIMIZER VÀ SCHEDULER
+    # =========================================================================
+    loss_type = str(exp_cfg.get("loss", "dice_ce"))
+    loss_gamma = float(exp_cfg.get("loss_gamma", 2.0))
+    loss_alpha = exp_cfg.get("loss_alpha", None)
+    if loss_alpha is not None:
+        loss_alpha = float(loss_alpha)
+
+    loss_fn = get_loss_function(
+        loss_type=loss_type,
+        include_background=False,
+        sigmoid=True,
+        squared_pred=False,
+        gamma=loss_gamma,
+        alpha=loss_alpha,
+    )
+
+    weight_decay = float(exp_cfg.get("weight_decay", args.weight_decay))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=learning_rate,
-        weight_decay=args.weight_decay,
+        weight_decay=weight_decay,
     )
     total_epochs = 1 if args.dry_run else max_epochs
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    is_resumed = False
+    resumed_source = None
+    resumed_epoch = 0
+    start_epoch = 1
+    best_dice = -1.0
+
+    if args.resume_from:
+        resume_file = Path(args.resume_from).resolve()
+        if not resume_file.is_file():
+            raise FileNotFoundError(f"Resume checkpoint file not found: {resume_file}")
+
+        logger.info("=" * 75)
+        logger.info("RESUME MODE ACTIVATED: Restoring state from %s", resume_file)
+        logger.info("=" * 75)
+
+        ckpt = torch.load(resume_file, map_location=device, weights_only=False)
+
+        # Verify checkpoint state keys and manifest compatibility
+        verify_resume_checkpoint(
+            ckpt=ckpt,
+            model_name=model_name,
+            in_channels=in_channels,
+            roi_size=roi_size,
+            val_roi_size=val_roi_size,
+            fold=args.fold,
+            split_manifest=split_manifest,
+            checkpoint_name=resume_file.name,
+        )
+
+        # Load weights into model
+        model.load_state_dict(ckpt["model_state_dict"], strict=True)
+        # Load optimizer states (momentum buffers)
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        # Load scheduler states (CosineAnnealingLR last_epoch and T_max)
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        # Load scaler state
+        if use_amp and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+
+        resumed_epoch = int(ckpt["epoch"])
+        start_epoch = resumed_epoch + 1
+        best_dice = float(ckpt.get("best_dice", ckpt.get("val_dice", ckpt.get("current_dice", -1.0))))
+        is_resumed = True
+        resumed_source = str(resume_file)
+
+        restored_lr = optimizer.param_groups[0]["lr"]
+        sched_last_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, "get_last_lr") else restored_lr
+        logger.info(
+            "Restored State Summary: Resumed from Epoch %d -> Next Epoch: %d | Restored LR: %.6e | Sched Last LR: %.6e | Sched T_max: %d | Best Dice: %.4f",
+            resumed_epoch,
+            start_epoch,
+            restored_lr,
+            sched_last_lr,
+            scheduler.T_max,
+            best_dice,
+        )
+        logger.info(
+            "NOTE ON REPRODUCIBILITY: RNG states (torch/cuda/numpy/random) were not stored in source checkpoint. "
+            "Resuming will follow a continuous optimization trajectory with stochastic mini-batch sequence (not a bit-for-bit exact replay)."
+        )
+
+    if args.end_epoch is not None:
+        total_epochs = int(args.end_epoch)
+        if total_epochs < start_epoch and not args.dry_run:
+            raise ValueError(f"--end-epoch ({total_epochs}) must be >= starting epoch ({start_epoch})")
+    elif args.dry_run:
+        total_epochs = start_epoch if is_resumed else 1
+    else:
+        total_epochs = max_epochs
+
+    val_interval = args.val_interval
+    if val_interval == 1 and "val_interval" in exp_cfg:
+        val_interval = int(exp_cfg["val_interval"])
+
+    postprocess_min_size = args.postprocess_min_size
+    if postprocess_min_size == 0:
+        postprocess_min_size = int(exp_cfg.get("postprocess_min_size", 0))
+    if postprocess_min_size > 0:
+        logger.info(
+            "3D Connected-Component Postprocessing enabled (min_size: %d voxels) | Val interval: %d",
+            postprocess_min_size,
+            val_interval,
+        )
+    else:
+        logger.info(
+            "Checkpoint selection uses raw validation Dice (postprocess_min_size: 0) | Val interval: %d",
+            val_interval,
+        )
+
+    resolved_manifest_cfg = {
+        "model_name": model_name,
+        "in_channels": in_channels,
+        "modalities": list(modalities),
+        "use_edwi": use_edwi,
+        "init_filters": init_filters,
+        "fusion_mode": fusion_mode,
+        "deep_supervision": deep_supervision,
+        "sampling_mode": sampling_mode,
+        "pos_ratio": pos_ratio,
+        "neg_ratio": neg_ratio,
+        "num_samples_per_volume": num_samples_per_volume,
+        "roi_size": list(roi_size),
+        "val_roi_size": list(val_roi_size),
+        "batch_size": batch_size,
+        "use_cache": use_cache,
+        "cache_rate": cache_rate,
+        "loss_type": loss_type,
+        "loss_gamma": loss_gamma,
+        "loss_alpha": loss_alpha,
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
+        "max_epochs": max_epochs,
+        "total_epochs": total_epochs,
+        "start_epoch": start_epoch,
+        "val_interval": val_interval,
+        "sw_overlap": float(args.sw_overlap),
+        "postprocess_min_size": postprocess_min_size,
+        "amp": use_amp,
+        "seed": seed_val,
+        "is_dry_run": bool(args.dry_run),
+        "is_resumed": is_resumed,
+        "resumed_from": resumed_source,
+        "resumed_epoch": resumed_epoch,
+        "scheduler_t_max": scheduler.T_max,
+        "rng_state_restored": False,
+        "rng_note": "RNG states (torch/cuda/numpy/random) not restored; stochastic continuation, not bit-for-bit exact replay.",
+    }
+    run_manifest = build_run_manifest(
+        repo_root=PROJECT_ROOT,
+        config_path=config_path,
+        raw_cfg=cfg,
+        resolved_cfg=resolved_manifest_cfg,
+        split_manifest=split_manifest,
+        data_dir=args.data_dir,
+        strict_isles250=strict_isles250,
+        expected_num_cases=expected_num_cases,
+        init_sum=init_sum,
+        init_l2=init_l2,
+    )
+    manifest_file = write_run_manifest(run_manifest, run_dir / "run_manifest.json")
+    logger.info(
+        "Saved run manifest: %s | git_commit=%s (dirty=%s) | config_sha256=%s",
+        manifest_file,
+        run_manifest["code_version"]["git_commit"][:12],
+        run_manifest["code_version"]["git_dirty"],
+        run_manifest["config"]["config_sha256"][:16],
+    )
+
     # =========================================================================
     # BƯỚC 6: XỬ LÝ CHẾ ĐỘ THỬ NGHIỆM NHANH (DRY-RUN SMOKE TEST)
     # =========================================================================
     if args.dry_run:
-        logger.info("[DRY-RUN] Executing 2 training steps...")
-        train_loss = train_epoch(
+        logger.info(
+            "[DRY-RUN] Executing %d real training batches (forward + backward + optimizer/AMP)...",
+            args.dry_run_steps,
+        )
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.empty_cache()
+
+        pre_train_sum, pre_train_l2 = _compute_model_checksum(model)
+        t0_train = time.time()
+        train_loss, train_telem = train_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -381,32 +895,160 @@ def main() -> None:
             scaler=scaler,
             device=device,
             use_amp=use_amp,
-            max_steps=2,
+            max_steps=args.dry_run_steps,
         )
-        logger.info("[DRY-RUN] Training steps completed. Train Loss: %.4f", train_loss)
+        t_train = time.time() - t0_train
+        step_sec = t_train / max(args.dry_run_steps, 1)
+        train_peak_mb = (
+            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
+        if not math.isfinite(train_loss):
+            raise RuntimeError(f"[DRY-RUN] Non-finite training loss observed: {train_loss}")
 
-        logger.info("[DRY-RUN] Executing sliding window validation on 1 volume...")
-        val_dice, num_cases = validate(
+        skipped = train_telem.get("skipped_steps", 0)
+        if skipped >= args.dry_run_steps:
+            raise RuntimeError(
+                f"[DRY-RUN] All {args.dry_run_steps} training steps were skipped by AMP GradScaler! "
+                f"No optimizer update occurred."
+            )
+
+        scheduler.step()
+        post_train_sum, post_train_l2 = _compute_model_checksum(model)
+        if abs(post_train_sum - pre_train_sum) < 1e-9 and abs(post_train_l2 - pre_train_l2) < 1e-9:
+            raise RuntimeError(
+                f"[DRY-RUN] Model weights did not change after optimizer step "
+                f"(pre_sum={pre_train_sum:.6f}, post_sum={post_train_sum:.6f})."
+            )
+        logger.info(
+            "[DRY-RUN] Train steps + optimizer + scheduler OK | Loss: %.4f | Step: %.2fs/batch | Train Peak VRAM: %.1f MB (%.2f GB)",
+            train_loss,
+            step_sec,
+            train_peak_mb,
+            train_peak_mb / 1024.0,
+        )
+
+        logger.info(
+            "[DRY-RUN] Executing sliding-window validation on %d real volumes (val_roi_size: %s)...",
+            args.dry_run_val_cases,
+            val_roi_size,
+        )
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        t0_val = time.time()
+        val_dice, num_cases, total_pos_voxels = validate(
             model=model,
             loader=val_loader,
-            patch_size=roi_size,
+            patch_size=val_roi_size,
             device=device,
             use_amp=use_amp,
             overlap=args.sw_overlap,
-            max_cases=1,
+            max_cases=args.dry_run_val_cases,
+            postprocess_min_size=postprocess_min_size,
         )
-        logger.info("[DRY-RUN] Validation completed. Case Dice Score: %.4f", val_dice)
+        t_val = time.time() - t0_val
+        val_case_sec = t_val / max(num_cases, 1)
+        val_peak_mb = (
+            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
+        if num_cases < 1 or not math.isfinite(val_dice):
+            raise RuntimeError(f"[DRY-RUN] Invalid validation result: cases={num_cases}, dice={val_dice}")
+        logger.info(
+            "[DRY-RUN] Validation completed (%d cases in %.1fs, %.2fs/case). Mean Dice: %.4f | Pos Voxels: %d | Val Peak VRAM: %.1f MB (%.2f GB)",
+            num_cases,
+            t_val,
+            val_case_sec,
+            val_dice,
+            total_pos_voxels,
+            val_peak_mb,
+            val_peak_mb / 1024.0,
+        )
+
+        total_gpu_mb = (
+            torch.cuda.get_device_properties(device).total_memory / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
+        overall_peak_mb = max(train_peak_mb, val_peak_mb)
+        headroom_mb = total_gpu_mb - overall_peak_mb
+        batches_per_ep = max(len(train_loader), 1)
+        total_val_cases = len(val_loader.dataset) if hasattr(val_loader, "dataset") else 50
+        num_val_runs = max(100 // max(val_interval, 1), 1)
+        est_100ep_sec = (100 * batches_per_ep * step_sec) + (num_val_runs * total_val_cases * val_case_sec)
+        est_100ep_hours = est_100ep_sec / 3600.0
+
+        logger.info("=" * 75)
+        logger.info("[BENCHMARK SUMMARY] Resource Profile & Scaling Estimate:")
+        logger.info("  Train Patch Size (roi_size): %s | Val Sliding Window: %s", roi_size, val_roi_size)
+        logger.info("  Train Speed: %.2fs / batch (est. train-only 100ep: %.2f h)", step_sec, (100 * batches_per_ep * step_sec) / 3600.0)
+        logger.info("  Val Speed:   %.2fs / case  (est. val-only 100ep [%d runs]: %.2f h)", val_case_sec, num_val_runs, (num_val_runs * total_val_cases * val_case_sec) / 3600.0)
+        logger.info("  Peak VRAM:   Train = %.1f MB (%.2f GB) | Val = %.1f MB (%.2f GB)", train_peak_mb, train_peak_mb / 1024.0, val_peak_mb, val_peak_mb / 1024.0)
+        logger.info("  Headroom:    %.1f MB (%.2f GB free out of %.1f MB total on %s)", headroom_mb, headroom_mb / 1024.0, total_gpu_mb, device)
+        logger.info("  Projected 100-Epoch Duration: %.2f hours", est_100ep_hours)
+        logger.info("=" * 75)
 
         checkpoint_path = run_dir / "dry_run_checkpoint.pth"
         torch.save(
             {
+                "epoch": start_epoch if is_resumed else 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "val_dice": val_dice,
+                "best_dice": val_dice,
+                "run_manifest": run_manifest,
+                "resume_provenance": {
+                    "is_resumed": is_resumed,
+                    "resumed_from": resumed_source,
+                    "resumed_epoch": resumed_epoch,
+                },
             },
             checkpoint_path,
         )
-        logger.info("[DRY-RUN] Checkpoint saved successfully at %s", checkpoint_path)
+        logger.info("[DRY-RUN] Checkpoint saved at %s. Verifying reload + inference parity...", checkpoint_path)
+
+        reloaded_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if reloaded_ckpt.get("run_manifest", {}).get("split", {}).get("val_sha256") != split_manifest["val_sha256"]:
+            raise RuntimeError("[DRY-RUN] Reloaded checkpoint manifest mismatch.")
+
+        verify_model = get_model(
+            model_name=model_name,
+            in_channels=in_channels,
+            out_channels=1,
+            **model_kwargs,
+        ).to(device)
+        verify_model.load_state_dict(reloaded_ckpt["model_state_dict"], strict=True)
+        optimizer.load_state_dict(reloaded_ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(reloaded_ckpt["scheduler_state_dict"])
+        scaler.load_state_dict(reloaded_ckpt["scaler_state_dict"])
+
+        reload_sum, reload_l2 = _compute_model_checksum(verify_model)
+        if abs(reload_sum - post_train_sum) > 1e-3 or abs(reload_l2 - post_train_l2) > 1e-4:
+            raise RuntimeError(
+                f"[DRY-RUN] Weight mismatch after reload: saved=({post_train_sum:.6f}, {post_train_l2:.6f}) "
+                f"vs reloaded=({reload_sum:.6f}, {reload_l2:.6f})."
+            )
+
+        verify_model.eval()
+        with torch.no_grad():
+            smoke_batch = next(iter(train_loader))
+            smoke_inputs = smoke_batch["image"][:1].to(device, non_blocking=True)
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                smoke_out = verify_model(smoke_inputs)
+                main_out = smoke_out[0] if isinstance(smoke_out, (tuple, list)) else smoke_out
+                if not torch.isfinite(main_out).all():
+                    raise RuntimeError("[DRY-RUN] Non-finite output tensor during post-reload forward pass.")
+        del verify_model
+
+        logger.info(
+            "[DRY-RUN] Save/Load + Post-reload forward verification PASSED (sum=%.6f, out_shape=%s).",
+            reload_sum,
+            tuple(main_out.shape),
+        )
         logger.info("=" * 75)
         logger.info("DRY-RUN PASSED 100%%! Pipeline configured via %s is verified and ready.", config_path.name)
         logger.info("=" * 75)
@@ -415,20 +1057,23 @@ def main() -> None:
     # =========================================================================
     # BƯỚC 7: VÒNG LẶP HUẤN LUYỆN CHUẨN (STANDARD TRAINING & VALIDATION LOOP)
     # =========================================================================
-    best_dice = -1.0
+    if seed_val is not None:
+        set_determinism(seed=seed_val)
     val_dice = 0.0
     start_time = time.time()
+    telemetry_file = run_dir / "telemetry_history.jsonl"
 
-    for epoch in range(1, total_epochs + 1):
+    for epoch in range(start_epoch, total_epochs + 1):
         logger.info("-" * 75)
         logger.info(
-            "Starting Epoch %d/%d (LR: %.2e)...",
+            "Starting Epoch %d/%d (LR: %.2e, Sched T_max: %d)...",
             epoch,
             total_epochs,
             optimizer.param_groups[0]["lr"],
+            scheduler.T_max,
         )
         epoch_start = time.time()
-        train_loss = train_epoch(
+        train_loss, telem = train_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -441,33 +1086,40 @@ def main() -> None:
         epoch_duration = time.time() - epoch_start
 
         logger.info(
-            "Epoch %d/%d (%.1fs) - Train Loss: %.4f | LR: %.2e",
+            "Epoch %d/%d (%.1fs) - Train Loss: %.4f | LR: %.2e | Grad Norm: %.4f | Empty Patch Ratio: %.2f",
             epoch,
             total_epochs,
             epoch_duration,
             train_loss,
             optimizer.param_groups[0]["lr"],
+            telem.get("grad_norm", 0.0),
+            telem.get("empty_patch_ratio", 0.0),
         )
 
+        val_ran = False
+        val_pos_voxels = 0
         # Đánh giá Validation định kỳ
-        if epoch % args.val_interval == 0 or epoch == total_epochs:
+        if epoch % val_interval == 0 or epoch == total_epochs:
             val_start = time.time()
-            val_dice, num_cases = validate(
+            val_dice, num_cases, val_pos_voxels = validate(
                 model=model,
                 loader=val_loader,
-                patch_size=roi_size,
+                patch_size=val_roi_size,
                 device=device,
                 use_amp=use_amp,
                 overlap=args.sw_overlap,
+                postprocess_min_size=postprocess_min_size,
             )
             val_duration = time.time() - val_start
+            val_ran = True
 
             logger.info(
-                "Epoch %d Validation (%.1fs): Mean Dice: %.4f (%d subjects)",
+                "Epoch %d Validation (%.1fs): Mean Dice: %.4f (%d subjects, %d positive voxels predicted)",
                 epoch,
                 val_duration,
                 val_dice,
                 num_cases,
+                val_pos_voxels,
             )
 
             # Lưu checkpoint tốt nhất (Best Metric)
@@ -479,7 +1131,15 @@ def main() -> None:
                         "epoch": epoch,
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "scaler_state_dict": scaler.state_dict(),
                         "best_dice": best_dice,
+                        "run_manifest": run_manifest,
+                        "resume_provenance": {
+                            "is_resumed": is_resumed,
+                            "resumed_from": resumed_source,
+                            "resumed_epoch": resumed_epoch,
+                        },
                     },
                     best_model_path,
                 )
@@ -489,6 +1149,46 @@ def main() -> None:
                     best_model_path,
                 )
 
+        # Milestone checkpoints around 80, 85, 90, 95, 100
+        if epoch in (80, 85, 90, 95, 100):
+            milestone_path = run_dir / f"checkpoint_epoch_{epoch}.pth"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
+                    "val_dice": val_dice if val_ran else None,
+                    "best_dice": best_dice,
+                    "run_manifest": run_manifest,
+                    "resume_provenance": {
+                        "is_resumed": is_resumed,
+                        "resumed_from": resumed_source,
+                        "resumed_epoch": resumed_epoch,
+                    },
+                },
+                milestone_path,
+            )
+            logger.info("--> Milestone checkpoint saved at %s", milestone_path)
+
+        # Write epoch telemetry record
+        telem_record = {
+            "epoch": epoch,
+            "lr": optimizer.param_groups[0]["lr"],
+            "val_ran": val_ran,
+            "val_dice": val_dice if val_ran else None,
+            "val_pos_voxels": val_pos_voxels if val_ran else None,
+            **telem,
+        }
+        with open(telemetry_file, "a", encoding="utf-8") as tf:
+            tf.write(json.dumps(telem_record) + "\n")
+
+        # Ensure logs are flushed to disk immediately on every epoch
+        for handler in logger.handlers:
+            handler.flush()
+        sys.stdout.flush()
+
         # Lưu checkpoint gần nhất ở mỗi epoch (Last Checkpoint)
         latest_path = run_dir / "last_checkpoint.pth"
         torch.save(
@@ -496,7 +1196,16 @@ def main() -> None:
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "current_dice": val_dice,
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "current_dice": val_dice if val_ran else None,
+                "best_dice": best_dice,
+                "run_manifest": run_manifest,
+                "resume_provenance": {
+                    "is_resumed": is_resumed,
+                    "resumed_from": resumed_source,
+                    "resumed_epoch": resumed_epoch,
+                },
             },
             latest_path,
         )

@@ -46,6 +46,11 @@ experiments/runs/
 !experiments/results/
 !experiments/results/*.md
 
+experiments/Kaggle/
+experiments/results/*.csv
+
+# Local scratch work
+/tmp/
 
 # Local-only notes and reports
 dat1.md

@@ -1,0 +1,35 @@
+# Paired Fold 0 Scaled Patch Experiment: 96x96x80 with 150 Epochs
+# Dual-Encoder SegResNet V3 Baseline (Voxel-Uniform Pos/Neg Sampling)
+# Verified ISLES-2022 (250 Cases: 200 Train / 50 Val on Fold 0)
+# Preserves all architecture, split, seed, loss, and sampler; tests 96x96x80 patch under 150 epochs schedule.
+
+experiment:
+  model_name: "dual_segresnet"
+  in_channels: 2
+  init_filters: 32
+  fusion_mode: "bidirectional"
+  deep_supervision: true
+  sampling_mode: "standard"
+  max_epochs: 150
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  loss: "dice_focal"
+  loss_gamma: 2.0
+  val_interval: 5
+  postprocess_min_size: 0
+  seed: 42
+  strict_isles250: true
+  expected_num_cases: 250
+
+data:
+  modalities: ["dwi", "adc"]
+  roi_size: [96, 96, 80]
+  val_roi_size: [96, 96, 64]
+  batch_size: 2
+  num_workers: 4
+  use_cache: true
+  cache_rate: 1.0
+  pos_ratio: 1.0
+  neg_ratio: 1.0
+  num_samples_per_volume: 2
+  sampling_mode: "standard"

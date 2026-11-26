@@ -1,0 +1,1 @@
+hôm nay lên báo cáo, ko bị dài dong như nhóm khác t vào thẳng vấn đề đã và đang triển khai làm đc gì nói tầm 5p, thầy nói nhóm làm OK đấy và thầy có nói thêm vài điểm. như là "e tiếp tục thử triển khai theo kiến trức của họ và chạy thử xem dice ntn vì đôi lúc mấy bài báo họ mafia khống số lê, ko biết đc. Vậy là tốt r đó."

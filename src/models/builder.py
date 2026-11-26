@@ -67,9 +67,22 @@ def get_model(
             out_channels=out_channels,
             **kwargs,
         )
+    elif normalized_name in ("dual_segresnet", "dual_encoder_segresnet"):
+        logger.info(
+            "Building 3D DualEncoderSegResNet (Paper 5 Innovation, in_channels=%d, out_channels=%d)",
+            in_channels,
+            out_channels,
+        )
+        from src.models.dual_segresnet import DualEncoderSegResNet
+
+        return DualEncoderSegResNet(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            **kwargs,
+        )
     else:
         raise ValueError(
-            f"Unsupported model_name: '{model_name}'. Available options: 'segresnet', 'mednext', 'swin_unetr'."
+            f"Unsupported model_name: '{model_name}'. Available options: 'segresnet', 'mednext', 'swin_unetr', 'dual_segresnet'."
         )
 
 
