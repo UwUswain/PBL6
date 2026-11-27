@@ -99,7 +99,9 @@ export default function CasePage() {
         <div className="card">
           <h2>{t('viewerTitle')}</h2>
           <Suspense fallback={<p className="muted">{t('loading')}</p>}>
-            <Viewer caseId={c.id} modalities={c.volumes.map((v) => v.modality as Modality)} maskId={shownMask} />
+            <Viewer caseId={c.id} modalities={c.volumes.map((v) => v.modality as Modality)} maskId={shownMask}
+              editable={!c.approval && !activeJob && c.masks.length > 0}
+              onEditSaved={() => { setViewMask(null); load() }} />
           </Suspense>
         </div>
       )}
@@ -158,7 +160,7 @@ export default function CasePage() {
             <>
               <label>{t('approveVersion')}
                 <select value={approval.mask} onChange={(e) => setApproval({ ...approval, mask: e.target.value })}>
-                  {c.masks.map((m) => <option key={m.id} value={m.id}>v{m.version_no} · {m.model_name ?? t('srcDoctor')} · {f.num(m.stats.volume_ml)} mL</option>)}
+                  {c.masks.filter((m) => !m.stats.pending).map((m) => <option key={m.id} value={m.id}>v{m.version_no} · {m.source === 'ai' ? m.model_name : t('srcDoctor')} · {f.num(m.stats.volume_ml)} mL</option>)}
                 </select>
               </label>
               <label>{t('patientNote')}
@@ -186,11 +188,17 @@ function MaskRow({ m, shown, onView }: { m: MaskVersion; shown: boolean; onView:
   return (
     <tr className={shown ? 'selected' : ''}>
       <td>v{m.version_no}<div className="muted small">{f.time(m.created_at)}</div></td>
-      <td>{m.source === 'ai' ? `${t('srcAi')} · ${m.model_name}` : t('srcDoctor')}</td>
-      <td><strong className="big-num">{f.num(m.stats.volume_ml)}</strong> mL</td>
-      <td>{m.stats.lesion_count}</td>
-      <td>{t(`hemi_${m.stats.hemisphere}` as Key)}</td>
-      <td className="small">{top.map((r) => `${f.region(r)} ${Math.round(r.share * 100)}%`).join(', ') || '–'}</td>
+      <td>{m.source === 'ai' ? `${t('srcAi')} · ${m.model_name}` : t('srcDoctor')}{m.note && <div className="muted small">{m.note}</div>}</td>
+      {m.stats.pending ? (
+        <td colSpan={4} className="muted">{t('pendingStats')}</td>
+      ) : (
+        <>
+          <td><strong className="big-num">{f.num(m.stats.volume_ml)}</strong> mL</td>
+          <td>{m.stats.lesion_count}</td>
+          <td>{t(`hemi_${m.stats.hemisphere}` as Key)}</td>
+          <td className="small">{top.map((r) => `${f.region(r)} ${Math.round(r.share * 100)}%`).join(', ') || '–'}</td>
+        </>
+      )}
       <td className="row-actions">
         <button className="btn-small" onClick={onView} aria-pressed={shown}>{t('viewVersion')}</button>
         <button className="btn-small" onClick={() => downloadFile(`/masks/${m.id}/file`, `mask_v${m.version_no}.nii.gz`)}>{t('download')}</button>

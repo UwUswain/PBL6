@@ -1,7 +1,7 @@
 import { Niivue, NVImage, SHOW_RENDER } from '@niivue/niivue'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { fetchAuthed } from '../lib/api'
+import { api, ApiError, fetchAuthed } from '../lib/api'
 import { useI18n, type Key } from '../lib/i18n'
 
 export type Modality = 'dwi' | 'adc' | 'flair'
@@ -14,6 +14,10 @@ interface Props {
   caseId: string
   modalities: Modality[]
   maskId?: string | null
+  /** Doctor may edit (an AI mask exists, not approved, no job running). */
+  editable?: boolean
+  /** Called after an edit was saved as a new version. */
+  onEditSaved?: () => void
 }
 
 async function loadImage(path: string, name: string, colormap: string, opacity = 1): Promise<NVImage> {
@@ -41,7 +45,7 @@ function lesionSlices(mask: NVImage): [number, number, number][] {
   return out  // shortcut: assumes the third voxel axis is roughly axial (true for ISLES); reorient for oblique uploads
 }
 
-export default function Viewer({ caseId, modalities, maskId }: Props) {
+export default function Viewer({ caseId, modalities, maskId, editable = false, onEditSaved }: Props) {
   const { t } = useI18n()
   const canvas = useRef<HTMLCanvasElement>(null)
   const nvRef = useRef<Niivue | null>(null)
@@ -57,6 +61,22 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
   const [loc, setLoc] = useState('')
   const [status, setStatus] = useState<string>('')
   const [lesionInfo, setLesionInfo] = useState({ index: -1, count: 0 })
+  const [editing, setEditing] = useState(false)
+  const [tool, setTool] = useState<'draw' | 'erase'>('draw')
+  const [pen, setPen] = useState(2)
+  const [liveMl, setLiveMl] = useState<number | null>(null)
+  const [note, setNote] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [editError, setEditError] = useState('')
+
+  const updateLive = useCallback(() => {
+    const nv = nvRef.current, mask = maskRef.current
+    if (!nv?.drawBitmap || !mask) { setLiveMl(null); return }
+    let n = 0
+    for (const v of nv.drawBitmap) if (v) n++
+    const px = mask.hdr!.pixDims
+    setLiveMl((n * Math.abs(px[1] * px[2] * px[3])) / 1000)
+  }, [])
 
   const layout = useCallback((nv: Niivue, max: Panel | null) => {
     const W = nv.canvas!.clientWidth || 1, H = nv.canvas!.clientHeight || 1
@@ -87,11 +107,12 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
       nv.canvas!.parentElement!.style.backgroundColor = ''  // NiiVue paints the parent black
       nv.setSliceType(nv.sliceTypeMultiplanar)
       nv.onLocationChange = (d) => setLoc((d as { string?: string }).string ?? '')
+      nv.onDrawingChanged = () => updateLive()
       observer = new ResizeObserver(() => { if (nv.volumes.length) layout(nv, maxRef.current) })
       observer.observe(nv.canvas!)
     })
     return () => { observer?.disconnect(); nvRef.current = null; cache.current = {}; maskRef.current = null }
-  }, [layout])
+  }, [layout, updateLive])
 
   useEffect(() => {
     maxRef.current = maxPanel
@@ -129,9 +150,63 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
   useEffect(() => {
     const nv = nvRef.current
     if (nv && maskRef.current && nv.volumes.includes(maskRef.current)) {
-      nv.setOpacity(nv.volumes.indexOf(maskRef.current), showMask ? opacity : 0)
+      // While editing, the drawing layer shows the mask; the overlay copy would double it.
+      nv.setOpacity(nv.volumes.indexOf(maskRef.current), showMask && !editing ? opacity : 0)
     }
-  }, [showMask, opacity, lesionInfo.count, bg])
+  }, [showMask, opacity, lesionInfo.count, bg, editing])
+
+  // Editing starts once the DWI background is loaded: the drawing must share the mask's (DWI) grid.
+  useEffect(() => {
+    const nv = nvRef.current
+    if (!editing || !nv || bg !== 'dwi' || status || !maskRef.current || nv.drawBitmap) return
+    if (!nv.loadDrawing(maskRef.current)) { setEditing(false); setEditError(t('errEdit')); return }
+    nv.setDrawingEnabled(true)
+    updateLive()
+  }, [editing, bg, status, updateLive, t])
+
+  useEffect(() => {
+    const nv = nvRef.current
+    if (!nv || !editing) return
+    nv.setPenValue(tool === 'erase' ? 0 : 1, false)
+    nv.opts.penSize = pen
+  }, [tool, pen, editing, liveMl === null])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopEditing = useCallback(() => {
+    const nv = nvRef.current
+    if (nv) { nv.setDrawingEnabled(false); nv.closeDrawing() }
+    setEditing(false)
+    setLiveMl(null)
+    setNote('')
+  }, [])
+
+  useEffect(() => { if (!editable && editing) stopEditing() }, [editable, editing, stopEditing])
+
+  function startEditing() {
+    setEditError('')
+    setBg('dwi')
+    setEditing(true)
+  }
+
+  async function saveEdit() {
+    const nv = nvRef.current
+    if (!nv) return
+    setSaving(true)
+    setEditError('')
+    try {
+      const bytes = await nv.saveImage({ filename: '', isSaveDrawing: true, volumeByIndex: 0 })
+      if (!(bytes instanceof Uint8Array)) throw new Error(t('errEdit'))
+      const body = new FormData()
+      body.append('file', new Blob([bytes as BlobPart]), 'edited.nii')
+      if (note.trim()) body.append('note', note.trim())
+      await api(`/cases/${caseId}/masks`, { method: 'POST', body })
+      stopEditing()
+      onEditSaved?.()
+    } catch (e) {
+      setEditError(e instanceof ApiError ? e.message : String((e as Error).message ?? e))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   useEffect(() => { nvRef.current?.setRadiologicalConvention(radiological) }, [radiological])
 
@@ -152,8 +227,15 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
 
   function onKey(e: React.KeyboardEvent) {
     const nv = nvRef.current
-    if (!nv || e.altKey || e.ctrlKey || e.metaKey) return
+    if (!nv) return
+    if (editing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); nv.drawUndo(); updateLive(); return }
+    if (e.altKey || e.ctrlKey || e.metaKey) return
     const keys: Record<string, () => void> = {
+      ...(editing ? {
+        e: () => setTool((x) => (x === 'draw' ? 'erase' : 'draw')),
+        '[': () => setPen((x) => Math.max(1, x - 1)),
+        ']': () => setPen((x) => Math.min(10, x + 1)),
+      } : {}),
       ArrowUp: () => nv.moveCrosshairInVox(0, 0, 1),
       ArrowDown: () => nv.moveCrosshairInVox(0, 0, -1),
       n: () => jumpLesion(1),
@@ -175,7 +257,7 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
       <div className="viewer-tools" role="toolbar" aria-label={t('viewerTools')}>
         <div className="seg" role="radiogroup" aria-label={t('background')}>
           {(['dwi', 'adc', 'flair'] as Modality[]).map((m) => (
-            <button key={m} type="button" role="radio" aria-checked={bg === m} disabled={!modalities.includes(m)} onClick={() => setBg(m)}>
+            <button key={m} type="button" role="radio" aria-checked={bg === m} disabled={!modalities.includes(m) || editing} onClick={() => setBg(m)}>
               {m.toUpperCase()}
             </button>
           ))}
@@ -194,7 +276,28 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
           </>
         )}
         <label className="check"><input type="checkbox" checked={radiological} onChange={(e) => setRadiological(e.target.checked)} /> {t('radiological')}</label>
+        {maskId && !editing && (
+          <button type="button" className="btn-small" onClick={startEditing} disabled={!editable} title={editable ? '' : t('editLocked')}>{t('editStart')}</button>
+        )}
       </div>
+
+      {editing && (
+        <div className="edit-bar" role="toolbar" aria-label={t('editStart')}>
+          <div className="seg" role="radiogroup" aria-label={t('editTool')}>
+            <button type="button" role="radio" aria-checked={tool === 'draw'} onClick={() => setTool('draw')}>{t('toolDraw')}</button>
+            <button type="button" role="radio" aria-checked={tool === 'erase'} onClick={() => setTool('erase')}>{t('toolErase')}</button>
+          </div>
+          <label className="inline">{t('penSize')} {pen}
+            <input type="range" min={1} max={10} value={pen} onChange={(e) => setPen(Number(e.target.value))} />
+          </label>
+          <button type="button" className="btn-small" onClick={() => { nvRef.current?.drawUndo(); updateLive() }}>{t('undo')}</button>
+          <strong className="live">{liveMl === null ? t('loading') : t('editLive', { v: liveMl.toFixed(2) })}</strong>
+          <input className="edit-note" placeholder={t('editNote')} aria-label={t('editNote')} value={note} maxLength={1000} onChange={(e) => setNote(e.target.value)} />
+          <button type="button" className="btn-primary" onClick={saveEdit} disabled={saving || liveMl === null}>{saving ? t('saving') : t('saveEdit')}</button>
+          <button type="button" className="btn-small" onClick={stopEditing} disabled={saving}>{t('cancel')}</button>
+        </div>
+      )}
+      {editError && <p className="form-error" role="alert">{editError}</p>}
 
       <div className="vw" tabIndex={0} onKeyDown={onKey} aria-label={t('viewerHelp')}>
         <div className={`vw-cells ${maxPanel ? 'single' : ''}`} aria-hidden="true">
@@ -216,7 +319,7 @@ export default function Viewer({ caseId, modalities, maskId }: Props) {
         {status && <div className="vw-status" role="status">{status}</div>}
         <div className="vw-loc">{loc}</div>
       </div>
-      <p className="muted small">{t('viewerHelp')}</p>
+      <p className="muted small">{t(editing ? 'editHelp' : 'viewerHelp')}</p>
     </div>
   )
 }

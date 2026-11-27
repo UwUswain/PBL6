@@ -142,6 +142,12 @@ a.btn-small { text-decoration: none; display: inline-flex; align-items: center; 
 .btn-max:hover { border-color: var(--accent); color: #fff; }
 .vw-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #d9d9d9; background: rgba(0, 0, 0, .7); padding: 8px 14px; border-radius: 4px; z-index: 3; }
 .vw-loc { position: absolute; left: 0; bottom: 0; max-width: calc(50% - 5px); padding: 3px 10px; font: 12px ui-monospace, Consolas, monospace; color: #cfd8e3; background: rgba(0, 0, 0, .55); border-radius: 0 0 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; z-index: 2; pointer-events: none; }
+.edit-bar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 6px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.edit-bar label { margin: 0; }
+.edit-bar input[type="range"] { width: 100px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
+.edit-bar .live { color: var(--accent); }
+.edit-bar .edit-note { width: 220px; margin: 0; min-height: 34px; padding: 6px 8px; }
+.edit-bar .btn-primary { min-height: 34px; padding: 6px 14px; margin: 0; }
 tr.selected td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 
 @media (max-width: 760px) {

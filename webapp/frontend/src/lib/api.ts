@@ -120,6 +120,7 @@ export interface CaseSummary {
 export interface Region { region: string | null; side: 'left' | 'right' | null; ml: number; share: number }
 
 export interface MaskStats {
+  pending?: boolean  // doctor edit waiting for the worker's recompute
   volume_ml: number
   lesion_count: number
   hemisphere: 'left' | 'right' | 'both' | 'none'
