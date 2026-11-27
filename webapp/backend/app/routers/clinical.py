@@ -11,11 +11,12 @@ from fastapi.responses import FileResponse
 import nibabel as nib
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.deps import Principal, audit, get_db, require_roles
-from app.models import Approval, Case, Job, MaskVersion, ModelEntry, Patient, Volume
+from app.models import Approval, AuthSession, Case, Job, MaskVersion, ModelEntry, Patient, User, Volume
+from app.security import hash_password, temporary_password
 from app.storage import case_dir, save_nifti_upload
 
 router = APIRouter(prefix="/api/v1", tags=["clinical"])
@@ -222,6 +223,48 @@ def update_patient(patient_id: uuid.UUID, body: PatientUpdate, request: Request,
     audit(db, request, "patient.update", "patient", actor_id=p.user.id, resource_id=str(pt.id))
     db.commit()
     return pt
+
+
+class AccountOut(BaseModel):
+    username: str
+    temporary_password: str  # shown once; the patient must change it at first sign-in
+
+
+@router.post("/patients/{patient_id}/account", response_model=AccountOut, status_code=201)
+def create_patient_account(patient_id: uuid.UUID, request: Request, p: Principal = Depends(doctor),
+                           db: Session = Depends(get_db)):
+    """The patient's own sign-in: it can only see this patient's approved studies."""
+    pt = _patient(db, p, patient_id)
+    if pt.user_id is not None:
+        raise HTTPException(409, "This patient already has an account; reset its password instead")
+    username = f"bn-{pt.code.lower()}"
+    if db.scalar(select(User.id).where(User.username == username)):
+        raise HTTPException(409, f"Username {username} is taken")
+    temp = temporary_password()
+    user = User(username=username, display_name=pt.code, role="patient", password_hash=hash_password(temp),
+                must_change_password=True)
+    db.add(user)
+    db.flush()
+    pt.user_id = user.id
+    audit(db, request, "patient.account_create", "patient", actor_id=p.user.id, resource_id=str(pt.id))
+    db.commit()
+    return AccountOut(username=username, temporary_password=temp)
+
+
+@router.post("/patients/{patient_id}/account/reset-password", response_model=AccountOut)
+def reset_patient_password(patient_id: uuid.UUID, request: Request, p: Principal = Depends(doctor),
+                           db: Session = Depends(get_db)):
+    pt = _patient(db, p, patient_id)
+    user = db.get(User, pt.user_id) if pt.user_id else None
+    if user is None:
+        raise HTTPException(404, "This patient has no account")
+    temp = temporary_password()
+    user.password_hash, user.must_change_password = hash_password(temp), True
+    db.execute(update(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+               .values(revoked_at=datetime.now(timezone.utc), revoke_reason="password_reset"))
+    audit(db, request, "patient.account_reset", "patient", actor_id=p.user.id, resource_id=str(pt.id))
+    db.commit()
+    return AccountOut(username=user.username, temporary_password=temp)
 
 
 @router.get("/patients/{patient_id}/cases", response_model=list[CaseOut])

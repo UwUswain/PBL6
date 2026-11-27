@@ -95,6 +95,9 @@ def recompute(job_id: uuid.UUID) -> None:
         version = db.scalar(select(MaskVersion).where(MaskVersion.case_id == job.case_id,
                                                       MaskVersion.version_no == int(job.model_name.lstrip("v"))))
         case_id, mask_path, dwi_path, version_id = job.case_id, Path(version.path), Path(dwi.path), version.id
+        # The regions map belongs to the case (made by the AI run), so its atlas fit carries over to edits.
+        ai_fit = db.scalar(select(MaskVersion.stats).where(MaskVersion.case_id == case_id, MaskVersion.source == "ai")
+                           .order_by(MaskVersion.version_no.desc()).limit(1)) or {}
 
     set_stage(job_id, "regions")
     ref = nib.load(str(dwi_path))
@@ -106,6 +109,8 @@ def recompute(job_id: uuid.UUID) -> None:
     regions_path = DATA_DIR / "cases" / str(case_id) / "regions.nii.gz"
     if regions_path.is_file():
         stats["regions"] = region_stats(mask, np.asarray(nib.load(str(regions_path)).dataobj), zooms)
+        if "atlas_fit" in ai_fit:
+            stats["atlas_fit"] = ai_fit["atlas_fit"]
 
     set_stage(job_id, "saving")
     # Store the binary mask the stats describe (the viewer's drawing may hold other pen values).
