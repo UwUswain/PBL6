@@ -148,6 +148,24 @@ a.btn-small { text-decoration: none; display: inline-flex; align-items: center; 
 .edit-bar .live { color: var(--accent); }
 .edit-bar .edit-note { width: 220px; margin: 0; min-height: 34px; padding: 6px 8px; }
 .edit-bar .btn-primary { min-height: 34px; padding: 6px 14px; margin: 0; }
+.account-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.account-row h2 { margin-bottom: 4px; }
+.account-row p { margin: 0; }
+/* Patient portal: larger text, calm layout */
+.result-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.result-card { display: flex; flex-direction: column; gap: 6px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; color: var(--text); text-decoration: none; font-size: 15px; transition: border-color .15s, transform .15s; }
+.result-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.result-card .go { color: var(--accent); font-weight: 600; margin-top: 6px; }
+.patient-grid { display: grid; grid-template-columns: minmax(0, 1fr) 440px; gap: 16px; align-items: start; }
+.brain-canvas { position: relative; height: min(70vh, 640px); background: #000; border-radius: 6px; overflow: hidden; }
+.brain-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.brain .views { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.patient-text { font-size: 15px; line-height: 1.6; }
+.patient-text h1 { font-size: 20px; }
+.patient-text h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); margin: 18px 0 6px; }
+.patient-text ul { margin: 0; padding-left: 20px; }
+.patient-text li + li { margin-top: 4px; }
+@media (max-width: 900px) { .patient-grid { grid-template-columns: 1fr; } .account-row { flex-direction: column; align-items: stretch; } }
 tr.selected td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 
 @media (max-width: 760px) {

@@ -1,0 +1,124 @@
+{
+  "_ghi_chu": "Nội dung hiển thị ở chế độ bệnh nhân và trong báo cáo PDF. Sửa câu chữ tại đây, không cần sửa code. Giữ nguyên các chỗ {volume}, {count}, {time}: chúng được thay bằng số liệu thật. Bản nháp này CHƯA được người có chuyên môn y khoa duyệt.",
+  "vi": {
+    "heading": "Giải thích kết quả",
+    "approved": "Bác sĩ đã xem xét kết quả này lúc {time}.",
+    "what_title": "Hình ảnh này cho thấy gì?",
+    "what": "Ảnh chụp cộng hưởng từ (MRI) não của bạn đã được một chương trình máy tính phân tích. Chương trình tô màu đỏ những vùng não có dấu hiệu bị thiếu máu nuôi (nhồi máu não). Mô hình não được làm trong suốt để bạn thấy vùng đỏ nằm ở đâu; bạn có thể kéo chuột hoặc vuốt để xoay.",
+    "summary_title": "Tóm tắt",
+    "volume": "Tổng thể tích vùng tô đỏ: khoảng {volume} mL.",
+    "count_one": "Có 1 vùng được tô đỏ.",
+    "count_many": "Có {count} vùng được tô đỏ, tách rời nhau.",
+    "side_left": "Vùng tô đỏ nằm chủ yếu ở nửa não bên trái.",
+    "side_right": "Vùng tô đỏ nằm chủ yếu ở nửa não bên phải.",
+    "side_both": "Vùng tô đỏ nằm ở cả hai nửa não.",
+    "edited": "Bác sĩ đã kiểm tra và chỉnh sửa lại vùng tô đỏ do chương trình tạo ra.",
+    "none": "Chương trình không tô đỏ vùng nào. Điều này không có nghĩa là chắc chắn không có tổn thương; hãy hỏi bác sĩ về kết quả của bạn.",
+    "note_title": "Ghi chú của bác sĩ",
+    "limits_title": "Những điều cần biết",
+    "limits": [
+      "Đây là kết quả do máy tính tạo ra để tham khảo. Chẩn đoán và điều trị do bác sĩ quyết định.",
+      "Chỉ riêng kích thước vùng tô đỏ không đủ để biết bệnh nặng hay nhẹ, hay khả năng hồi phục. Điều đó cần bác sĩ đánh giá cùng các thông tin khác.",
+      "Chương trình có thể bỏ sót những vùng tổn thương rất nhỏ, hoặc tô nhầm vùng bình thường."
+    ],
+    "questions_title": "Câu hỏi bạn có thể hỏi bác sĩ",
+    "questions": [
+      "Vùng tổn thương này có thể ảnh hưởng đến những chức năng nào của tôi?",
+      "Kế hoạch điều trị và phục hồi chức năng của tôi là gì?",
+      "Tôi cần làm gì để giảm nguy cơ bị đột quỵ lần nữa?",
+      "Khi nào tôi cần tái khám hoặc chụp lại?"
+    ],
+    "regions_title": "Vùng não liên quan",
+    "region_share": "Khoảng {pct}% vùng tô đỏ nằm ở {region}.",
+    "region_with_side": "{region} bên {side}",
+    "side_names": {
+      "left": "trái",
+      "right": "phải"
+    },
+    "region_names": {
+      "frontal": "thùy trán",
+      "parietal": "thùy đỉnh",
+      "temporal": "thùy thái dương",
+      "occipital": "thùy chẩm",
+      "insula": "thùy đảo",
+      "basal_ganglia": "vùng nhân nền",
+      "thalamus": "đồi thị",
+      "cerebellum": "tiểu não",
+      "brainstem": "thân não"
+    },
+    "region_functions": {
+      "frontal": "Thùy trán thường liên quan đến cử động của cơ thể, việc lập kế hoạch, sự chú ý và cách cư xử. Ở nhiều người, thùy trán bên trái còn tham gia vào việc nói.",
+      "parietal": "Thùy đỉnh thường liên quan đến cảm giác của cơ thể (chạm, đau, nóng lạnh) và việc định hướng trong không gian.",
+      "temporal": "Thùy thái dương thường liên quan đến nghe, trí nhớ và hiểu lời nói.",
+      "occipital": "Thùy chẩm thường liên quan đến việc nhìn và nhận biết những gì mắt thấy.",
+      "insula": "Thùy đảo thường liên quan đến cảm nhận những gì diễn ra bên trong cơ thể, vị giác và cảm xúc.",
+      "basal_ganglia": "Vùng nhân nền thường giúp điều khiển cử động cho trơn tru và đúng ý muốn.",
+      "thalamus": "Đồi thị thường làm nhiệm vụ chuyển tiếp các tín hiệu cảm giác lên vỏ não và góp phần giữ sự tỉnh táo.",
+      "cerebellum": "Tiểu não thường liên quan đến giữ thăng bằng và phối hợp cử động.",
+      "brainstem": "Thân não thường điều khiển các hoạt động tự động như thở, nhịp tim, nuốt, và là đường dẫn tín hiệu giữa não với cơ thể."
+    },
+    "region_unclear": "Vùng tô đỏ nhỏ hoặc nằm rải ở nhiều vùng, nên chương trình không nêu chức năng liên quan. Hãy hỏi bác sĩ để biết thêm.",
+    "region_note": "Vị trí được ước lượng bằng cách so ảnh của bạn với một bộ não mẫu, nên chỉ gần đúng. Mỗi vùng não có nhiều chức năng; ảnh hưởng thật sự với bạn cần bác sĩ đánh giá."
+  },
+  "en": {
+    "heading": "Understanding your result",
+    "approved": "A doctor reviewed this result at {time}.",
+    "what_title": "What does this image show?",
+    "what": "Your brain MRI scan was analysed by a computer program. The program colours in red the areas of the brain that show signs of losing their blood supply (ischemic stroke). The brain model is see-through so you can see where the red areas are; drag or swipe to rotate it.",
+    "summary_title": "Summary",
+    "volume": "Total size of the red areas: about {volume} mL.",
+    "count_one": "There is 1 red area.",
+    "count_many": "There are {count} separate red areas.",
+    "side_left": "The red area is mostly on the left side of the brain.",
+    "side_right": "The red area is mostly on the right side of the brain.",
+    "side_both": "The red areas are on both sides of the brain.",
+    "edited": "Your doctor checked and adjusted the red area made by the program.",
+    "none": "The program did not mark any area. This does not mean there is certainly no damage; please ask your doctor about your result.",
+    "note_title": "Note from your doctor",
+    "limits_title": "Things to know",
+    "limits": [
+      "This is a computer-generated result for reference. Diagnosis and treatment are decided by your doctor.",
+      "The size of the red area alone does not tell how serious the stroke is or how well you will recover. Your doctor assesses that together with other information.",
+      "The program can miss very small areas of damage, or mark normal areas by mistake."
+    ],
+    "questions_title": "Questions you may want to ask your doctor",
+    "questions": [
+      "Which of my abilities could this area affect?",
+      "What is my treatment and rehabilitation plan?",
+      "What can I do to lower the risk of another stroke?",
+      "When should I come back for a check-up or another scan?"
+    ],
+    "regions_title": "Brain areas involved",
+    "region_share": "About {pct}% of the red area is in the {region}.",
+    "region_with_side": "{side} {region}",
+    "side_names": {
+      "left": "left",
+      "right": "right"
+    },
+    "region_names": {
+      "frontal": "frontal lobe",
+      "parietal": "parietal lobe",
+      "temporal": "temporal lobe",
+      "occipital": "occipital lobe",
+      "insula": "insula",
+      "basal_ganglia": "basal ganglia",
+      "thalamus": "thalamus",
+      "cerebellum": "cerebellum",
+      "brainstem": "brainstem"
+    },
+    "region_functions": {
+      "frontal": "The frontal lobe is usually involved in body movement, planning, attention and behaviour. In many people the left frontal lobe also helps with speaking.",
+      "parietal": "The parietal lobe is usually involved in body sensation (touch, pain, temperature) and sense of space.",
+      "temporal": "The temporal lobe is usually involved in hearing, memory and understanding speech.",
+      "occipital": "The occipital lobe is usually involved in seeing and recognising what the eyes see.",
+      "insula": "The insula is usually involved in sensing what happens inside the body, taste and emotion.",
+      "basal_ganglia": "The basal ganglia usually help make movements smooth and intended.",
+      "thalamus": "The thalamus usually relays sensory signals to the brain's surface and helps keep you alert.",
+      "cerebellum": "The cerebellum is usually involved in balance and coordinating movement.",
+      "brainstem": "The brainstem usually controls automatic functions such as breathing, heart rate and swallowing, and carries signals between the brain and the body."
+    },
+    "region_unclear": "The red area is small or spread over several areas, so the program does not name a related function. Please ask your doctor.",
+    "region_note": "The location is estimated by comparing your scan with a standard brain, so it is approximate. Each brain area has many roles; how this affects you needs your doctor's assessment."
+  },
+  "_nguon_vung_nao": "Câu chức năng vùng não viết theo mức phổ thông, dựa trên NINDS (Viện Quốc gia về Rối loạn Thần kinh và Đột quỵ, Hoa Kỳ), 'Brain Basics: Know Your Brain'. Bản nháp, CẦN người có chuyên môn y khoa duyệt. Giữ nguyên {pct}, {region}, {side}."
+}

@@ -33,12 +33,13 @@
 | 27/11 | RAM: "Docker" trên Task Manager là VM WSL; Linux giữ cache file (ảnh Docker, model) nên VM đứng ở mức trần (mặc định 50% = 8 GB). `.wslconfig`: `memory=5GB` + `autoMemoryReclaim=dropCache` để trả cache khi rảnh | Laptop 16 GB hay lag khi chạy song song IDE, trình duyệt |
 | 27/11 | Đo lại RAM khi hệ thống chạy: VM WSL 4,9 GB = cache file 3,0 GB + 4 container 0,73 GB (worker 528 MB) + Docker engine ~0,3 GB + Ubuntu ~0,4 GB; ứng dụng Docker Desktop thêm ~0,9 GB trên Windows. Xả cache bằng tay: RAM máy 84% → 75%. `autoMemoryReclaim` (đã sửa đúng mục `[experimental]`) **không có tác dụng** với VM của Docker Desktop (rảnh 3 phút vẫn giữ 5 GB). Container `memtrim` (xả cache mỗi 5 phút, privileged) bị bộ kiểm tra an toàn chặn, nên không dùng; khi cần thì xả bằng tay | Đã tắt WSL integration của Docker với Ubuntu: Ubuntu không còn tự bật cùng Docker (~0,4 GB) |
 | 27/11 | **M3 phần 1–2:** viewer React (4 ô, phóng to, nhảy lát có tổn thương, phím tắt) và sửa mask (cọ/tẩy/hoàn tác, lưu thành phiên bản mới, worker tính lại). Trong Docker: xóa 1 lát của ca 0121 → v2 = 4,088 mL, khớp tính tay | Test giao diện sửa mask bằng trình duyệt chưa chạy vì RAM máy 87–88% |
+| 27/11 | **M3 xong (cổng bệnh nhân bản 1):** bác sĩ cấp tài khoản `bn-<mã>` (mật khẩu tạm, bắt đổi), bệnh nhân chỉ thấy ca **đã duyệt** của mình và đúng phiên bản đã duyệt; trang kết quả = não 3D trong suốt + giải thích (nội dung chuyển từ `web/static/patient_text.json`, giữ quy tắc an toàn 15% / 0,5 mL / 20% / atlas 0,8). Kiểm tra trong Docker và Chrome | Câu chữ vẫn là bản nháp, cần người có chuyên môn y khoa duyệt |
 | 25/11 | Khác biệt chính: **vai trò bệnh nhân** (dễ hiểu, tôn trọng tâm lý, có khu vực chờ để bệnh nhân bấm, khám phá); họ tên thật: quyết sau | Nhóm bạn không có vai trò này |
 
 ## 2. Việc đang dở
 
 - Tải gói trọng số DeepISLES: dừng ở 5,0/8,5 GB (tải tiếp được, có kiểm tra MD5), chưa giải nén. Sau đó thêm 3 mục vào `web/config.yaml` và chạy thử.
-- Giai đoạn 7: M0, M1, M2 xong. Tiếp theo M3: chuyển viewer sang React (xem, sửa mask), cổng bệnh nhân bản 1.
+- Giai đoạn 7: M0–M3 xong. Tiếp theo M4: khu vực chờ của bệnh nhân bản 2, admin theo dõi job/benchmark, model DeepISLES, CI, tập dượt bảo vệ.
 - Chờ bạn quyết: lệnh khôi phục admin; bỏ bắt buộc dòng mật khẩu bootstrap trong `.env`; file tải dở 5 GB `external/stroke_ensemble_weights.7z.parts`.
 - Khu vực chờ của bệnh nhân: chờ bàn nội dung.
 - Cải tiến viewer học từ nhóm bạn (phím tắt, nhảy lát có tổn thương, phóng to một ô): chưa làm.

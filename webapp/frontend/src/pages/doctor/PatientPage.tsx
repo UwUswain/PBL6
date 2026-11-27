@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { api, ApiError, type CaseDetail, type CaseSummary, type Patient } from '../../lib/api'
@@ -14,6 +14,20 @@ export default function PatientPage() {
   const [cases, setCases] = useState<CaseSummary[] | null>(null)
   const [form, setForm] = useState({ study_date: '', notes: '' })
   const [error, setError] = useState('')
+  const [account, setAccount] = useState<{ username: string; temporary_password: string } | null>(null)
+  const dialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => { if (account) dialog.current?.showModal() }, [account])
+
+  async function issueAccount(reset: boolean) {
+    if (reset && !window.confirm(t('confirmResetPatient'))) return
+    setError('')
+    try {
+      setAccount(await api(`/patients/${id}/account${reset ? '/reset-password' : ''}`, { method: 'POST' }))
+      setPatient(await api<Patient>(`/patients/${id}`))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err))
+    }
+  }
 
   useEffect(() => {
     api<Patient>(`/patients/${id}`).then(setPatient).catch((e) => setError(e.message))
@@ -42,6 +56,32 @@ export default function PatientPage() {
           {t('birthYear')}: {patient.birth_year ?? '–'} · {t('sex')}: {patient.sex ? t(`sex${patient.sex}` as Key) : '–'}
         </p>
       )}
+      {patient && (
+        <div className="card account-row">
+          <div>
+            <h2>{t('patientAccount')}</h2>
+            <p className="muted small">{patient.has_account ? t('accountExists', { user: `bn-${patient.code.toLowerCase()}` }) : t('accountHint')}</p>
+          </div>
+          <button type="button" className={patient.has_account ? 'btn-small' : 'btn-primary'} onClick={() => issueAccount(patient.has_account)}>
+            {patient.has_account ? t('resetPassword') : t('giveAccount')}
+          </button>
+        </div>
+      )}
+      <dialog ref={dialog} onClose={() => setAccount(null)} aria-labelledby="acc-title">
+        {account && (
+          <>
+            <h2 id="acc-title">{t('tempPasswordFor', { user: account.username })}</h2>
+            <p className="muted small">{t('username')}: <strong>{account.username}</strong></p>
+            <p className="temp-password">{account.temporary_password}</p>
+            <p className="muted small">{t('patientAccountNote')}</p>
+            <div className="row-actions">
+              <button type="button" className="btn-small" onClick={() => navigator.clipboard?.writeText(`${account.username} / ${account.temporary_password}`)}>{t('copy')}</button>
+              <button type="button" className="btn-primary" onClick={() => dialog.current?.close()}>{t('close')}</button>
+            </div>
+          </>
+        )}
+      </dialog>
+
       <form className="card inline-form" onSubmit={create}>
         <h2>{t('newCase')}</h2>
         <label>{t('studyDate')}<input type="date" value={form.study_date} onChange={(e) => setForm({ ...form, study_date: e.target.value })} /></label>

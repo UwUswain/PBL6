@@ -1,7 +1,8 @@
 import { Niivue, NVImage, SHOW_RENDER } from '@niivue/niivue'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { api, ApiError, fetchAuthed } from '../lib/api'
+import { api, ApiError } from '../lib/api'
+import { loadImage } from '../lib/nifti'
 import { useI18n, type Key } from '../lib/i18n'
 
 export type Modality = 'dwi' | 'adc' | 'flair'
@@ -18,12 +19,6 @@ interface Props {
   editable?: boolean
   /** Called after an edit was saved as a new version. */
   onEditSaved?: () => void
-}
-
-async function loadImage(path: string, name: string, colormap: string, opacity = 1): Promise<NVImage> {
-  const buffer = await (await fetchAuthed(path)).arrayBuffer()
-  // NiiVue detects gzip from the bytes; the name only needs a NIfTI extension.
-  return NVImage.loadFromUrl({ url: name, name, buffer, colormap, opacity })
 }
 
 /** Axial slices (in the mask's own voxel grid) that contain lesion, with the in-slice centre of each. */
