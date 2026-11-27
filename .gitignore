@@ -58,3 +58,7 @@ external/
 webapp/.env
 webapp/frontend/node_modules/
 webapp/frontend/dist/
+
+# Temporary folders/files anywhere in the repo
+tmp/
+*.tmp
