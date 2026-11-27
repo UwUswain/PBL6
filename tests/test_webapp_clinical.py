@@ -174,6 +174,54 @@ class ClinicalFlowTest(unittest.TestCase):
         queue = self.c.get("/api/v1/cases?status=awaiting_review", headers=self.doc_a).json()
         self.assertIn(cid, [c["id"] for c in queue])
 
+    def test_doctor_edit_becomes_new_version_and_worker_recomputes(self):
+        import io
+        import sys
+        import uuid
+
+        import nibabel as nib
+        import numpy as np
+
+        _, case = self.new_case("PT-EDIT")
+        cid = case["id"]
+        self.upload(cid, "dwi", DWI)
+        self.upload(cid, "adc", ADC)
+        dwi = nib.load(DWI)
+
+        def nifti(data, affine):
+            buf = io.BytesIO()
+            img = nib.Nifti1Image(data, affine)
+            buf.write(img.to_bytes())
+            return buf.getvalue()
+
+        edit = np.zeros(dwi.shape[:3], np.uint8)
+        edit[40:45, 40:45, 30:35] = 1  # a 5x5x5 block
+        post = lambda body, h=None: self.c.post(f"/api/v1/cases/{cid}/masks", headers=h or self.doc_a,
+                                                files={"file": ("edited.nii", body)}, data={"note": "trimmed"})
+        self.assertEqual(post(nifti(edit, dwi.affine)).status_code, 409)  # no AI mask yet
+        self.add_mask(cid)
+        self.assertEqual(post(nifti(edit[:-1], dwi.affine)).status_code, 400)  # wrong grid
+        self.assertEqual(post(nifti(edit, dwi.affine), self.doc_b).status_code, 404)
+        r = post(nifti(edit, dwi.affine))
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual((r.json()["version_no"], r.json()["source"], r.json()["stats"]), (2, "doctor", {"pending": True}))
+        detail = self.c.get(f"/api/v1/cases/{cid}", headers=self.doc_a).json()
+        job = next(j for j in detail["jobs"] if j["state"] == "queued")
+        self.assertEqual(post(nifti(edit, dwi.affine)).status_code, 409)  # recompute still queued
+
+        # Run the worker's recompute directly (same code path as in Docker).
+        root = Path(__file__).resolve().parent.parent
+        os.environ.setdefault("APP_ROOT", str(root))
+        sys.path.insert(0, str(root / "webapp" / "worker"))
+        import worker
+
+        worker.DATA_DIR = Path(os.environ["DATA_DIR"])
+        worker.recompute(uuid.UUID(job["id"]))
+        m = self.c.get(f"/api/v1/cases/{cid}", headers=self.doc_a).json()["masks"][0]
+        zooms = dwi.header.get_zooms()[:3]
+        self.assertAlmostEqual(m["stats"]["volume_ml"], 125 * float(np.prod(zooms)) / 1000, places=4)
+        self.assertEqual((m["stats"]["lesion_count"], m["note"]), (1, "trimmed"))
+
 
 if __name__ == "__main__":
     unittest.main()

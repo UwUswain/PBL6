@@ -16,11 +16,12 @@ import uuid
 sys.path[:0] = [os.environ.get("APP_ROOT", "/srv/app"), os.environ.get("BACKEND_ROOT", "/srv/backend")]
 
 import nibabel as nib  # noqa: E402
+import numpy as np  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 
 from app.db import SessionLocal  # noqa: E402
 from app.models import Case, Job, MaskVersion, ModelEntry, Volume  # noqa: E402
-from web.inference import checkpoint_paths, load_config, predict, required_inputs  # noqa: E402
+from web.inference import checkpoint_paths, lesion_stats, load_config, midline_x, predict, required_inputs  # noqa: E402
 from web.regions import region_stats, safe_region_map  # noqa: E402
 
 log = logging.getLogger("worker")
@@ -86,9 +87,41 @@ def set_stage(job_id: uuid.UUID, stage: str) -> None:
         db.commit()
 
 
+def recompute(job_id: uuid.UUID) -> None:
+    """A doctor's edited mask: same stats and brain regions as an AI result, computed by the same functions."""
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        dwi = db.scalar(select(Volume).where(Volume.case_id == job.case_id, Volume.modality == "dwi"))
+        version = db.scalar(select(MaskVersion).where(MaskVersion.case_id == job.case_id,
+                                                      MaskVersion.version_no == int(job.model_name.lstrip("v"))))
+        case_id, mask_path, dwi_path, version_id = job.case_id, Path(version.path), Path(dwi.path), version.id
+
+    set_stage(job_id, "regions")
+    ref = nib.load(str(dwi_path))
+    mask = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
+    mask = mask.reshape(mask.shape[:3])
+    zooms = tuple(float(z) for z in ref.header.get_zooms()[:3])
+    stats = {**lesion_stats(mask, ref.affine, zooms, midline_x(np.asarray(ref.dataobj) > 0, ref.affine)),
+             "voxel_spacing_mm": list(zooms), "shape": list(mask.shape)}
+    regions_path = DATA_DIR / "cases" / str(case_id) / "regions.nii.gz"
+    if regions_path.is_file():
+        stats["regions"] = region_stats(mask, np.asarray(nib.load(str(regions_path)).dataobj), zooms)
+
+    set_stage(job_id, "saving")
+    # Store the binary mask the stats describe (the viewer's drawing may hold other pen values).
+    nib.save(nib.Nifti1Image(mask, ref.affine), str(mask_path))
+    with SessionLocal() as db:
+        db.get(MaskVersion, version_id).stats = stats
+        job = db.get(Job, job_id)
+        job.state, job.stage, job.finished_at = "succeeded", None, now()
+        db.commit()
+
+
 def run(job_id: uuid.UUID, config: dict) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
+        if job.kind == "recompute":
+            return recompute(job_id)
         paths = {v.modality: Path(v.path) for v in db.scalars(select(Volume).where(Volume.case_id == job.case_id))}
         model_cfg = config["models"].get(job.model_name)
         case_id, model_name, created_by = job.case_id, job.model_name, job.created_by

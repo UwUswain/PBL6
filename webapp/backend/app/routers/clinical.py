@@ -6,7 +6,7 @@ A doctor only sees their own patients; anything else answers 404 so existence is
 from datetime import date, datetime, timezone
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 import nibabel as nib
 import numpy as np
@@ -378,6 +378,36 @@ def mask_file(mask_id: uuid.UUID, p: Principal = Depends(doctor), db: Session = 
         raise HTTPException(404, "Mask not found")
     _case(db, p, m.case_id)
     return FileResponse(m.path, media_type="application/gzip", filename=f"mask_v{m.version_no}.nii.gz")
+
+
+@router.post("/cases/{case_id}/masks", response_model=MaskOut, status_code=201)
+def save_edited_mask(case_id: uuid.UUID, request: Request, file: UploadFile = File(...), note: str | None = Form(None),
+                     p: Principal = Depends(doctor), db: Session = Depends(get_db)):
+    """A doctor's edit becomes a new version; the worker recomputes its volume and brain regions (job 'recompute')."""
+    c = _case(db, p, case_id)
+    if _active_approval(db, c.id):
+        raise HTTPException(409, "Withdraw the approval before editing")
+    if db.scalar(select(func.count()).select_from(Job).where(Job.case_id == c.id, Job.state.in_(ACTIVE_JOB))):
+        raise HTTPException(409, "Wait for the running job to finish")
+    dwi = db.scalar(select(Volume).where(Volume.case_id == c.id, Volume.modality == "dwi"))
+    if dwi is None or not db.scalar(select(func.count()).select_from(MaskVersion).where(MaskVersion.case_id == c.id)):
+        raise HTTPException(409, "Run the AI first; edits start from an existing mask")
+    dwi_img = nib.load(dwi.path)
+
+    def same_grid_as_dwi(shape, affine):
+        if list(dwi_img.shape[:3]) != shape or not np.allclose(dwi_img.affine, affine, atol=1e-2):
+            raise HTTPException(400, "The edited mask is not on the DWI grid")
+
+    version_no = (db.scalar(select(func.max(MaskVersion.version_no)).where(MaskVersion.case_id == c.id)) or 0) + 1
+    mask_id = uuid.uuid4()
+    path, *_ = save_nifti_upload(file, case_dir(c.id) / "masks", f"v{version_no}_{mask_id.hex[:8]}", same_grid_as_dwi)
+    m = MaskVersion(id=mask_id, case_id=c.id, version_no=version_no, source="doctor", created_by=p.user.id,
+                    path=str(path), stats={"pending": True}, note=(note or "").strip()[:1000] or None)
+    db.add(m)
+    db.add(Job(case_id=c.id, kind="recompute", model_name=f"v{version_no}", created_by=p.user.id))
+    audit(db, request, "mask.edit", "case", actor_id=p.user.id, resource_id=str(c.id), detail={"version": version_no})
+    db.commit()
+    return m
 
 
 @router.post("/cases/{case_id}/approve", response_model=CaseDetail)
