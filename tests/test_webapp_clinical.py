@@ -208,6 +208,16 @@ class ClinicalFlowTest(unittest.TestCase):
         detail = self.c.get(f"/api/v1/cases/{cid}", headers=self.doc_a).json()
         job = next(j for j in detail["jobs"] if j["state"] == "queued")
         self.assertEqual(post(nifti(edit, dwi.affine)).status_code, 409)  # recompute still queued
+        # A version whose numbers are not computed yet cannot be approved.
+        from app.db import SessionLocal
+        from app.models import Job
+
+        with SessionLocal() as db:  # simulate the recompute job failing
+            db.get(Job, uuid.UUID(job["id"])).state = "failed"
+            db.commit()
+        r = self.c.post(f"/api/v1/cases/{cid}/approve", headers=self.doc_a, json={"mask_version_id": r.json()["id"]})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("not computed", r.json()["detail"])
 
         # Run the worker's recompute directly (same code path as in Docker).
         root = Path(__file__).resolve().parent.parent

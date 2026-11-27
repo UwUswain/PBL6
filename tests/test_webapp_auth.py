@@ -114,6 +114,11 @@ class AuthFlowTest(unittest.TestCase):
         r = c.post("/api/v1/auth/login", json={"username": "ghost-user", "password": "nope"})
         self.assertEqual(r.status_code, 429)
         self.assertGreater(int(r.headers["Retry-After"]), 0)
+        # nginx overwrites X-Forwarded-For with the real peer, so the API counts that address (see nginx.conf).
+        from app.deps import client_ip
+        from starlette.requests import Request
+        req = Request({"type": "http", "headers": [(b"x-forwarded-for", b"203.0.113.7")], "client": ("172.18.0.1", 1)})
+        self.assertEqual(client_ip(req), "203.0.113.7")
 
     def test_admin_manages_doctor_and_roles(self):
         admin = self.bearer(self.admin_token())

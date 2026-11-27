@@ -460,6 +460,8 @@ def approve(case_id: uuid.UUID, body: ApproveIn, request: Request, p: Principal 
     m = db.get(MaskVersion, body.mask_version_id)
     if m is None or m.case_id != c.id or m.deleted_at is not None:
         raise HTTPException(400, "Mask version does not belong to this case")
+    if m.stats.get("pending"):  # an edit whose recompute has not finished (or failed): patients would see no numbers
+        raise HTTPException(409, "This version's volume and regions are not computed yet")
     if _active_approval(db, c.id):
         raise HTTPException(409, "Already approved; withdraw first")
     if db.scalar(select(func.count()).select_from(Job).where(Job.case_id == c.id, Job.state.in_(ACTIVE_JOB))):
