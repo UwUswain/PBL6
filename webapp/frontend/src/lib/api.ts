@@ -168,17 +168,18 @@ export interface ModelInfo {
   info: { metrics?: { source?: string; values?: Record<string, number> } | null; note?: Record<string, string> | null } | null
 }
 
+/** GET with the bearer token, retrying once after a refresh (files cannot go through api(), which parses JSON). */
+export async function fetchAuthed(path: string): Promise<Response> {
+  const go = () => fetch(`/api/v1${path}`, { headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {} })
+  let res = await go()
+  if (res.status === 401 && (await refreshSession())) res = await go()
+  if (!res.ok) throw new ApiError(res.status, res.statusText)
+  return res
+}
+
 /** Authenticated file download (the token is a header, so a plain <a href> cannot be used). */
 export async function downloadFile(path: string, filename: string): Promise<void> {
-  const headers = new Headers()
-  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
-  let res = await fetch(`/api/v1${path}`, { headers })
-  if (res.status === 401 && (await refreshSession())) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-    res = await fetch(`/api/v1${path}`, { headers })
-  }
-  if (!res.ok) throw new ApiError(res.status, res.statusText)
-  const url = URL.createObjectURL(await res.blob())
+  const url = URL.createObjectURL(await (await fetchAuthed(path)).blob())
   const a = Object.assign(document.createElement('a'), { href: url, download: filename })
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)

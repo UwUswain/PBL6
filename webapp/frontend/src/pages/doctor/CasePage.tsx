@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { api, ApiError, downloadFile, type CaseDetail, type MaskVersion, type ModelInfo } from '../../lib/api'
+import type { Modality } from '../../components/Viewer'
 import { useI18n, type Key } from '../../lib/i18n'
 import { StatusTag, useFormat } from './common'
 
+// NiiVue is ~1 MB of JS: load it only when a study page opens.
+const Viewer = lazy(() => import('../../components/Viewer'))
 const SEQUENCES = ['dwi', 'adc', 'flair'] as const
 const ACTIVE = ['queued', 'running']
 
@@ -18,6 +21,7 @@ export default function CasePage() {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [approval, setApproval] = useState({ mask: '', note: '', show: true })
+  const [viewMask, setViewMask] = useState<string | null>(null)
 
   const load = useCallback(() => api<CaseDetail>(`/cases/${id}`).then((d) => {
     setCase(d)
@@ -56,6 +60,7 @@ export default function CasePage() {
   const have = new Set(c.volumes.map((v) => v.modality))
   const missing = selectedModel?.required.filter((r) => !have.has(r as 'dwi')) ?? []
   const approvedMask = c.approval ? c.masks.find((m) => m.id === c.approval!.mask_version_id) : null
+  const shownMask = viewMask ?? approvedMask?.id ?? c.masks[0]?.id ?? null
 
   return (
     <section className="case-page">
@@ -89,6 +94,15 @@ export default function CasePage() {
           })}
         </div>
       </div>
+
+      {c.volumes.length > 0 && (
+        <div className="card">
+          <h2>{t('viewerTitle')}</h2>
+          <Suspense fallback={<p className="muted">{t('loading')}</p>}>
+            <Viewer caseId={c.id} modalities={c.volumes.map((v) => v.modality as Modality)} maskId={shownMask} />
+          </Suspense>
+        </div>
+      )}
 
       <div className="card">
         <h2>{t('stepRun')}</h2>
@@ -125,11 +139,10 @@ export default function CasePage() {
           <div className="table-wrap">
             <table>
               <thead><tr><th>{t('version')}</th><th>{t('source')}</th><th>{t('volume')}</th><th>{t('lesions')}</th><th>{t('hemisphere')}</th><th>{t('regionsTop')}</th><th /></tr></thead>
-              <tbody>{c.masks.map((m) => <MaskRow key={m.id} m={m} />)}</tbody>
+              <tbody>{c.masks.map((m) => <MaskRow key={m.id} m={m} shown={m.id === shownMask} onView={() => setViewMask(m.id)} />)}</tbody>
             </table>
           </div>
         )}
-        <p className="muted small">{t('viewerSoon')}</p>
       </div>
 
       {c.masks.length > 0 && (
@@ -166,19 +179,22 @@ export default function CasePage() {
   )
 }
 
-function MaskRow({ m }: { m: MaskVersion }) {
+function MaskRow({ m, shown, onView }: { m: MaskVersion; shown: boolean; onView: () => void }) {
   const { t } = useI18n()
   const f = useFormat()
   const top = (m.stats.regions ?? []).filter((r) => r.region && r.share >= 0.15).slice(0, 3)
   return (
-    <tr>
+    <tr className={shown ? 'selected' : ''}>
       <td>v{m.version_no}<div className="muted small">{f.time(m.created_at)}</div></td>
       <td>{m.source === 'ai' ? `${t('srcAi')} · ${m.model_name}` : t('srcDoctor')}</td>
       <td><strong className="big-num">{f.num(m.stats.volume_ml)}</strong> mL</td>
       <td>{m.stats.lesion_count}</td>
       <td>{t(`hemi_${m.stats.hemisphere}` as Key)}</td>
       <td className="small">{top.map((r) => `${f.region(r)} ${Math.round(r.share * 100)}%`).join(', ') || '–'}</td>
-      <td><button className="btn-small" onClick={() => downloadFile(`/masks/${m.id}/file`, `mask_v${m.version_no}.nii.gz`)}>{t('download')}</button></td>
+      <td className="row-actions">
+        <button className="btn-small" onClick={onView} aria-pressed={shown}>{t('viewVersion')}</button>
+        <button className="btn-small" onClick={() => downloadFile(`/masks/${m.id}/file`, `mask_v${m.version_no}.nii.gz`)}>{t('download')}</button>
+      </td>
     </tr>
   )
 }
